@@ -1,29 +1,29 @@
 import { INodeType, INodeTypeDescription } from 'n8n-workflow';
 import { httpVerbFields, httpVerbOperations } from './HttpVerbDescription';
 
-export class HttpBin implements INodeType {
+export class Speckle implements INodeType {
 	description: INodeTypeDescription = {
-		displayName: 'HttpBin',
-		name: 'httpBin',
-		icon: { light: 'file:httpbin.svg', dark: 'file:httpbin.svg' },
+		displayName: 'Speckle',
+		name: 'speckle',
+		icon: { light: 'file:speckle.svg', dark: 'file:speckle.svg' },
 		group: ['transform'],
 		version: 1,
 		subtitle: '={{$parameter["operation"] + ": " + $parameter["resource"]}}',
-		description: 'Interact with HttpBin API',
+		description: 'Interact with Speckle API',
 		defaults: {
-			name: 'HttpBin',
+			name: 'Speckle',
 		},
 		inputs: ['main'],
 		outputs: ['main'],
 		usableAsTool: true,
 		credentials: [
 			{
-				name: 'httpbinApi',
+				name: 'speckleApi',
 				required: false,
 			},
 		],
 		requestDefaults: {
-			baseURL: 'https://httpbin.org',
+			baseURL: 'https://app.speckle.systems',
 			url: '',
 			headers: {
 				Accept: 'application/json',

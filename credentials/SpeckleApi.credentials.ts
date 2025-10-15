@@ -5,10 +5,10 @@ import {
 	INodeProperties,
 } from 'n8n-workflow';
 
-export class HttpBinApi implements ICredentialType {
-	name = 'httpbinApi';
-	displayName = 'HttpBin API';
-	documentationUrl = 'https://your-docs-url';
+export class SpeckleApi implements ICredentialType {
+	name = 'speckleApi';
+	displayName = 'Speckle API';
+	documentationUrl = 'https://speckle.guide';
 	properties: INodeProperties[] = [
 		{
 			displayName: 'Token',
@@ -23,7 +23,7 @@ export class HttpBinApi implements ICredentialType {
 			displayName: 'Domain',
 			name: 'domain',
 			type: 'string',
-			default: 'https://httpbin.org',
+			default: 'https://app.speckle.systems',
 		},
 	];
 
@@ -44,7 +44,7 @@ export class HttpBinApi implements ICredentialType {
 	test: ICredentialTestRequest = {
 		request: {
 			baseURL: '={{$credentials?.domain}}',
-			url: '/bearer',
+			url: '/api/v1/profile',
 		},
 	};
 }
