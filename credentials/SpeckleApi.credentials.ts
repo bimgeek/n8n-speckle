@@ -44,7 +44,14 @@ export class SpeckleApi implements ICredentialType {
 	test: ICredentialTestRequest = {
 		request: {
 			baseURL: '={{$credentials?.domain}}',
-			url: '/api/v1/profile',
+			url: '/graphql',
+			method: 'POST',
+			headers: {
+				'Content-Type': 'application/json',
+			},
+			body: {
+				query: 'query { activeUser { email name } }',
+			},
 		},
 	};
 }
