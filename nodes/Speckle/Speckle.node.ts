@@ -203,6 +203,84 @@ export class Speckle implements INodeType {
 			return [returnData];
 		}
 
+		// Handle Query Objects operation
+		if (resource === 'model' && operation === 'queryObjects') {
+			for (let itemIndex = 0; itemIndex < items.length; itemIndex++) {
+				try {
+					// Get input data - expecting array from Load Model
+					const inputData = items[itemIndex].json;
+
+					// Validate input is an array
+					if (!Array.isArray(inputData)) {
+						throw new NodeOperationError(
+							this.getNode(),
+							'Input must be an array of objects. Connect this to the output of Load Model operation.',
+							{ itemIndex },
+						);
+					}
+
+					// Step 1: Clean objects - remove unwanted fields
+					const fieldsToRemove = ['__closure', 'totalChildrenCount', 'renderMaterialProxies'];
+					const cleanedObjects = inputData.map((obj: any) => {
+						const cleaned = { ...obj };
+						fieldsToRemove.forEach((field) => {
+							if (field in cleaned) {
+								delete cleaned[field];
+							}
+						});
+						return cleaned;
+					});
+
+					// Helper: Check if object should be excluded
+					const shouldExcludeObject = (obj: any): boolean => {
+						const speckleType = obj.speckle_type || '';
+						return (
+							speckleType === 'Speckle.Core.Models.DataChunk' ||
+							speckleType.includes('Objects.Other.RawEncoding')
+						);
+					};
+
+					// Step 2: Detect if model has DataObjects
+					const hasDataObjects = cleanedObjects.some((obj: any) => {
+						const speckleType = obj.speckle_type || '';
+						return speckleType.includes('DataObject') && !shouldExcludeObject(obj);
+					});
+
+					// Step 3: Filter objects based on detection
+					let filteredObjects;
+					if (hasDataObjects) {
+						// Include ONLY DataObjects (and exclude DataChunk/RawEncoding)
+						filteredObjects = cleanedObjects.filter((obj: any) => {
+							const speckleType = obj.speckle_type || '';
+							return speckleType.includes('DataObject') && !shouldExcludeObject(obj);
+						});
+					} else {
+						// Include ALL objects except excluded types
+						filteredObjects = cleanedObjects.filter((obj: any) => !shouldExcludeObject(obj));
+					}
+
+					// Return filtered array (each object becomes a separate item)
+					filteredObjects.forEach((obj: any) => {
+						returnData.push({
+							json: obj,
+							pairedItem: itemIndex,
+						});
+					});
+				} catch (error) {
+					if (this.continueOnFail()) {
+						returnData.push({
+							json: { error: error.message },
+							pairedItem: itemIndex,
+						});
+					} else {
+						throw error;
+					}
+				}
+			}
+
+			return [returnData];
+		}
+
 		// For other resources (like HTTP Verb), return empty to use declarative routing
 		throw new NodeOperationError(
 			this.getNode(),

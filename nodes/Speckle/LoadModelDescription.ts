@@ -20,6 +20,12 @@ export const modelOperations: INodeProperties[] = [
 				description: 'Load model data from a Speckle URL',
 				action: 'Load a model from URL',
 			},
+			{
+				name: 'Query Objects',
+				value: 'queryObjects',
+				description: 'Clean and filter Speckle objects',
+				action: 'Query objects from model data',
+			},
 		],
 		default: 'loadModel',
 	},
