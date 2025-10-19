@@ -76,7 +76,6 @@ export class Speckle implements INodeType {
 		],
 	};
 
-
 	async execute(this: IExecuteFunctions): Promise<INodeExecutionData[][]> {
 		const items = this.getInputData();
 		const returnData: INodeExecutionData[] = [];
@@ -148,6 +147,306 @@ export class Speckle implements INodeType {
 					}
 				}
 			}
+		};
+
+		/**
+		 * Properties Flattening Algorithm - Helper Functions
+		 */
+
+		/**
+		 * Check if a path should be excluded from flattening
+		 */
+		const isPathExcluded = (currentPath: string): boolean => {
+			const EXCLUDED_PATHS = [
+				'Composite Structure',
+				'Material Quantities',
+				'Parameters.Type Parameters.Structure',
+			];
+
+			for (const excludedPath of EXCLUDED_PATHS) {
+				if (currentPath.includes(excludedPath)) {
+					return true;
+				}
+			}
+
+			return false;
+		};
+
+		/**
+		 * Resolve field name conflicts by appending parent path segments
+		 */
+		const resolveFieldName = (
+			fieldName: string,
+			parentPath: string | null,
+			existingFields: string[],
+		): string => {
+			const currentParentPath = parentPath || '';
+			const currentExistingFields = existingFields || [];
+
+			// Try the original field name first
+			const candidateName = fieldName;
+
+			// Case 1: No conflict - return original name
+			if (!currentExistingFields.includes(candidateName)) {
+				return candidateName;
+			}
+
+			// Case 2: Conflict exists but no parent path available - keep original
+			if (currentParentPath === '') {
+				return fieldName;
+			}
+
+			// Case 3: Conflict exists and parent path available - resolve with iteration
+			const pathParts = currentParentPath.split('.');
+			const reversedParts = pathParts.reverse();
+
+			// Generate candidate names by appending parents one by one
+			const candidates: string[] = [];
+
+			for (let depth = 1; depth <= reversedParts.length; depth++) {
+				const parentSegments = reversedParts.slice(0, depth);
+				const parentSuffix = parentSegments.join('.');
+				const candidate = `${fieldName}.${parentSuffix}`;
+				candidates.push(candidate);
+			}
+
+			// Find the first candidate that doesn't conflict
+			for (const candidate of candidates) {
+				if (!currentExistingFields.includes(candidate)) {
+					return candidate;
+				}
+			}
+
+			// If all candidates conflict, use the full path (last candidate)
+			return candidates[candidates.length - 1];
+		};
+
+		/**
+		 * Check if value is a record/object
+		 */
+		const isRecord = (value: any): boolean => {
+			return value !== null && typeof value === 'object' && !Array.isArray(value);
+		};
+
+		/**
+		 * Main flattening function - must be declared before the processing functions
+		 */
+		const flattenRecordImpl = (
+			inputRecord: any,
+			filterKeys: string[] | null,
+			parentPath: string | null,
+			existingFields: string[] | null,
+		): any => {
+			// Initialize parameters with defaults
+			const currentParentPath = parentPath || '';
+			const currentExistingFields = existingFields || [];
+
+			// Extract the "properties" field if it exists
+			let recordToProcess = null;
+
+			if (inputRecord === null) {
+				recordToProcess = null;
+			} else if (isRecord(inputRecord) && 'properties' in inputRecord) {
+				// Use the properties field instead of root record
+				recordToProcess = inputRecord.properties;
+			} else {
+				recordToProcess = inputRecord;
+			}
+
+			// Handle null input
+			if (recordToProcess === null) {
+				return {};
+			}
+
+			// Ensure input is a record (object)
+			if (!isRecord(recordToProcess)) {
+				// Wrap non-record values
+				return { Value: recordToProcess };
+			}
+
+			// Process all fields in the record
+			const fieldNames = Object.keys(recordToProcess);
+
+			// Initialize state
+			let state = {
+				FlattenedRecord: {},
+				ExistingFieldsList: currentExistingFields,
+			};
+
+			// Process each field sequentially (accumulation pattern)
+			for (const fieldName of fieldNames) {
+				state = processField(fieldName, recordToProcess[fieldName], currentParentPath, filterKeys, state);
+			}
+
+			// Return the flattened record
+			return state.FlattenedRecord;
+		};
+
+		/**
+		 * Process a single field
+		 */
+		const processField = (
+			fieldName: string,
+			fieldValue: any,
+			currentParentPath: string,
+			filterKeys: string[] | null,
+			state: { FlattenedRecord: any; ExistingFieldsList: string[] },
+		): { FlattenedRecord: any; ExistingFieldsList: string[] } => {
+			// Build the new path for this field
+			const newPath = currentParentPath === '' ? fieldName : `${currentParentPath}.${fieldName}`;
+
+			// Step 1: Check if path should be excluded
+			if (isPathExcluded(newPath)) {
+				return state; // Skip this field
+			}
+
+			// Step 2: Determine field type and process accordingly
+
+			// Case A: Field is a name/value record
+			if (isRecord(fieldValue) && 'name' in fieldValue && 'value' in fieldValue) {
+				return processNameValueRecord(fieldValue, currentParentPath, filterKeys, state);
+			}
+
+			// Case B: Field value is null
+			else if (fieldValue === null) {
+				return processNullValue(fieldName, currentParentPath, filterKeys, state);
+			}
+
+			// Case C: Field value is a nested record
+			else if (isRecord(fieldValue)) {
+				return processNestedRecord(fieldValue, newPath, filterKeys, state);
+			}
+
+			// Case D: Field value is a primitive (string, number, boolean) or array
+			else {
+				return processPrimitiveValue(fieldName, fieldValue, currentParentPath, filterKeys, state);
+			}
+		};
+
+		/**
+		 * Process name/value record pattern
+		 */
+		const processNameValueRecord = (
+			fieldValue: any,
+			currentParentPath: string,
+			filterKeys: string[] | null,
+			state: { FlattenedRecord: any; ExistingFieldsList: string[] },
+		): { FlattenedRecord: any; ExistingFieldsList: string[] } => {
+			const nameField = fieldValue.name;
+			const valueField = fieldValue.value;
+
+			// Check if nameField is null
+			if (nameField === null) {
+				return state;
+			}
+
+			// Resolve any naming conflicts
+			const resolvedName = resolveFieldName(nameField, currentParentPath, state.ExistingFieldsList);
+
+			// Add to flattened record
+			const newRecord = {
+				...state.FlattenedRecord,
+				[resolvedName]: valueField,
+			};
+
+			// Update existing fields list
+			const newFieldsList = [...state.ExistingFieldsList, resolvedName];
+
+			return {
+				FlattenedRecord: newRecord,
+				ExistingFieldsList: newFieldsList,
+			};
+		};
+
+		/**
+		 * Process null value
+		 */
+		const processNullValue = (
+			fieldName: string,
+			currentParentPath: string,
+			filterKeys: string[] | null,
+			state: { FlattenedRecord: any; ExistingFieldsList: string[] },
+		): { FlattenedRecord: any; ExistingFieldsList: string[] } => {
+			// Resolve naming conflicts
+			const resolvedName = resolveFieldName(fieldName, currentParentPath, state.ExistingFieldsList);
+
+			// Add null value to flattened record
+			const newRecord = {
+				...state.FlattenedRecord,
+				[resolvedName]: null,
+			};
+
+			const newFieldsList = [...state.ExistingFieldsList, resolvedName];
+
+			return {
+				FlattenedRecord: newRecord,
+				ExistingFieldsList: newFieldsList,
+			};
+		};
+
+		/**
+		 * Process nested record (recursion)
+		 */
+		const processNestedRecord = (
+			fieldValue: any,
+			newPath: string,
+			filterKeys: string[] | null,
+			state: { FlattenedRecord: any; ExistingFieldsList: string[] },
+		): { FlattenedRecord: any; ExistingFieldsList: string[] } => {
+			// Skip empty records
+			const fieldCount = Object.keys(fieldValue).length;
+			if (fieldCount === 0) {
+				return state;
+			}
+
+			// Recursively flatten the nested record
+			const flattened = flattenRecordImpl(fieldValue, filterKeys, newPath, state.ExistingFieldsList);
+
+			// Get all field names from the flattened result
+			const flattenedFieldNames = Object.keys(flattened);
+
+			// Merge the flattened record with current state
+			const combinedRecord = {
+				...flattened,
+				...state.FlattenedRecord,
+			};
+
+			// Update existing fields list with all fields from both records (remove duplicates)
+			const allFieldNames = [...state.ExistingFieldsList, ...flattenedFieldNames].filter(
+				(value, index, self) => self.indexOf(value) === index,
+			);
+
+			return {
+				FlattenedRecord: combinedRecord,
+				ExistingFieldsList: allFieldNames,
+			};
+		};
+
+		/**
+		 * Process primitive value
+		 */
+		const processPrimitiveValue = (
+			fieldName: string,
+			fieldValue: any,
+			currentParentPath: string,
+			filterKeys: string[] | null,
+			state: { FlattenedRecord: any; ExistingFieldsList: string[] },
+		): { FlattenedRecord: any; ExistingFieldsList: string[] } => {
+			// Resolve naming conflicts
+			const resolvedName = resolveFieldName(fieldName, currentParentPath, state.ExistingFieldsList);
+
+			// Add primitive value to flattened record
+			const newRecord = {
+				...state.FlattenedRecord,
+				[resolvedName]: fieldValue,
+			};
+
+			const newFieldsList = [...state.ExistingFieldsList, resolvedName];
+
+			return {
+				FlattenedRecord: newRecord,
+				ExistingFieldsList: newFieldsList,
+			};
 		};
 
 		// Handle Model resource with programmatic logic
@@ -365,6 +664,36 @@ export class Speckle implements INodeType {
 							json: obj,
 							pairedItem: itemIndex,
 						});
+					});
+				} catch (error) {
+					if (this.continueOnFail()) {
+						returnData.push({
+							json: { error: error.message },
+							pairedItem: itemIndex,
+						});
+					} else {
+						throw error;
+					}
+				}
+			}
+
+			return [returnData];
+		}
+
+		// Handle Query Properties operation
+		if (resource === 'model' && operation === 'queryProperties') {
+			for (let itemIndex = 0; itemIndex < items.length; itemIndex++) {
+				try {
+					// Get input data from previous node
+					const inputData = items[itemIndex].json;
+
+					// Flatten the properties using the algorithm
+					const flattenedProperties = flattenRecordImpl(inputData, null, null, null);
+
+					// Return flattened object as a new item
+					returnData.push({
+						json: flattenedProperties,
+						pairedItem: itemIndex,
 					});
 				} catch (error) {
 					if (this.continueOnFail()) {
