@@ -133,19 +133,24 @@ export class Speckle implements INodeType {
 					break;
 				}
 
-				// Fetch missing objects
+				// Fetch missing objects in parallel for better performance
 				const missingIdsArray = Array.from(missingIds);
-				for (const missingId of missingIdsArray) {
+				const fetchPromises = missingIdsArray.map(async (missingId) => {
 					try {
-						const missingObj = await loader.getObject({ id: missingId });
-						if (missingObj) {
-							objects.push(missingObj);
-						}
-					} catch (err) {
-						// Silently continue if object cannot be fetched
-						// This is expected for some reference types
+						return await loader.getObject({ id: missingId });
+					} catch (err: any) {
+						// Log warning but continue - this is expected for some reference types
+						this.logger.warn(`Failed to fetch referenced object ${missingId}: ${err.message}`);
+						return null;
 					}
-				}
+				});
+
+				const results = await Promise.all(fetchPromises);
+				results.forEach((obj) => {
+					if (obj) {
+						objects.push(obj);
+					}
+				});
 			}
 		};
 
