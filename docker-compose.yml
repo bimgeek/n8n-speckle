@@ -8,9 +8,13 @@ services:
       - "5678:5678"
     environment:
       - N8N_CUSTOM_EXTENSIONS=/home/node/.n8n/custom
+      - N8N_DEFAULT_BINARY_DATA_MODE=filesystem
+      - N8N_BINARY_DATA_STORAGE_PATH=/home/node/.n8n/binary-data
     volumes:
       - n8n_data:/home/node/.n8n
       - ./dist:/home/node/.n8n/custom:ro
+      - n8n_binary_data:/home/node/.n8n/binary-data
 
 volumes:
   n8n_data:
+  n8n_binary_data:
