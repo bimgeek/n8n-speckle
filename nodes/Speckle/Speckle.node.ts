@@ -170,22 +170,80 @@ export class Speckle implements INodeType {
 
 					const rootObjectId = modelData.versions.items[0].referencedObject;
 
-					// Step 2: REST API call to get objects
-					const objectsOptions: IHttpRequestOptions = {
+					// Step 2a: Download root object to get __closure
+					const rootObjectOptions: IHttpRequestOptions = {
 						method: 'GET',
-						url: `${domain}/objects/${projectId}/${rootObjectId}`,
+						url: `${domain}/objects/${projectId}/${rootObjectId}/single`,
 						headers: {
-							Accept: 'application/json',
+							Accept: 'text/plain',
 							Authorization: `Bearer ${token}`,
 						},
 						json: true,
 					};
 
-					const objectsResponse = await this.helpers.httpRequest(objectsOptions);
+					const rootObject = await this.helpers.httpRequest(rootObjectOptions);
 
-					// Return the raw objects array
+					// Step 2b: Extract all child object IDs from __closure
+					const childIds = Object.keys((rootObject as any).__closure || {});
+
+					// Attributes to remove from objects
+					const attributesToRemove = ['vertices', 'faces', 'colors', '__closure', 'encodedValue', 'displayValue','renderMaterialProxies', 'instanceDefinitionProxies', 'transform']
+
+					// If no children, return just the filtered root object
+					if (childIds.length === 0) {
+						const cleanedRoot = { ...(rootObject as any) };
+						attributesToRemove.forEach((attr) => {
+							delete cleanedRoot[attr];
+						});
+
+						returnData.push({
+							json: [cleanedRoot] as any,
+							pairedItem: itemIndex,
+						});
+						continue;
+					}
+
+					// Step 2c: Download all children with attribute masking
+					const childrenOptions: IHttpRequestOptions = {
+						method: 'POST',
+						url: `${domain}/api/v2/projects/${projectId}/object-stream/`,
+						headers: {
+							Accept: 'text/plain',
+							'Content-Type': 'application/json',
+							Authorization: `Bearer ${token}`,
+						},
+						body: {
+							objectIds: childIds,
+							attributeMask: {
+								exclude: attributesToRemove,
+							},
+						},
+						json: false,
+					};
+
+					const childrenResponse = await this.helpers.httpRequest(childrenOptions);
+
+					// Parse NDJSON response (format: objectId\tJSON\n per line)
+					const childrenArray = (childrenResponse as string)
+						.split('\n')
+						.filter((line: string) => line.trim())
+						.map((line: string) => {
+							const [, jsonString] = line.split('\t');
+							return JSON.parse(jsonString);
+						});
+
+					// Step 2d: Filter root object attributes (client-side)
+					const cleanedRoot = { ...(rootObject as any) };
+					attributesToRemove.forEach((attr) => {
+						delete cleanedRoot[attr];
+					});
+
+					// Step 2e: Combine root + children
+					const allObjects = [cleanedRoot, ...childrenArray];
+
+					// Return combined array
 					returnData.push({
-						json: objectsResponse,
+						json: allObjects as any,
 						pairedItem: itemIndex,
 					});
 				} catch (error) {
