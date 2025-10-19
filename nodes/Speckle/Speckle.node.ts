@@ -6,6 +6,7 @@ import type {
 	IHttpRequestOptions,
 } from 'n8n-workflow';
 import { NodeOperationError } from 'n8n-workflow';
+import { ObjectLoader2Factory } from '@speckle/objectloader2';
 import { httpVerbFields, httpVerbOperations } from './HttpVerbDescription';
 import { modelFields, modelOperations } from './LoadModelDescription';
 
@@ -75,15 +76,85 @@ export class Speckle implements INodeType {
 		],
 	};
 
+
 	async execute(this: IExecuteFunctions): Promise<INodeExecutionData[][]> {
 		const items = this.getInputData();
 		const returnData: INodeExecutionData[] = [];
 		const resource = this.getNodeParameter('resource', 0) as string;
 		const operation = this.getNodeParameter('operation', 0) as string;
 
+		/**
+		 * Extract all referencedId properties from an object recursively
+		 */
+		const extractReferencedIds = (obj: any, referencedIds: Set<string>): void => {
+			if (!obj || typeof obj !== 'object') return;
+
+			// Check for referencedId property
+			if (obj.referencedId && typeof obj.referencedId === 'string') {
+				referencedIds.add(obj.referencedId);
+			}
+
+			// Recursively check all properties
+			for (const value of Object.values(obj)) {
+				if (value && typeof value === 'object') {
+					extractReferencedIds(value, referencedIds);
+				}
+			}
+		};
+
+		/**
+		 * Resolve missing object references by iteratively fetching them
+		 */
+		const resolveMissingReferences = async (loader: any, objects: any[]): Promise<void> => {
+			const MAX_ITERATIONS = 10;
+			let iterationCount = 0;
+
+			while (iterationCount < MAX_ITERATIONS) {
+				iterationCount++;
+
+				// Build set of existing object IDs
+				const existingIds = new Set(objects.map((obj: any) => obj.id));
+
+				// Find all referenced IDs
+				const referencedIds = new Set<string>();
+				for (const obj of objects) {
+					extractReferencedIds(obj, referencedIds);
+				}
+
+				// Find missing IDs
+				const missingIds = new Set<string>();
+				for (const refId of referencedIds) {
+					if (!existingIds.has(refId)) {
+						missingIds.add(refId);
+					}
+				}
+
+				// Exit if no missing references
+				if (missingIds.size === 0) {
+					break;
+				}
+
+				// Fetch missing objects
+				const missingIdsArray = Array.from(missingIds);
+				for (const missingId of missingIdsArray) {
+					try {
+						const missingObj = await loader.getObject({ id: missingId });
+						if (missingObj) {
+							objects.push(missingObj);
+						}
+					} catch (err) {
+						// Silently continue if object cannot be fetched
+						// This is expected for some reference types
+					}
+				}
+			}
+		};
+
 		// Handle Model resource with programmatic logic
 		if (resource === 'model' && operation === 'loadModel') {
 			for (let itemIndex = 0; itemIndex < items.length; itemIndex++) {
+				let loader: any = null;
+
 				try {
 					const modelUrl = this.getNodeParameter('modelUrl', itemIndex) as string;
 
@@ -170,80 +241,42 @@ export class Speckle implements INodeType {
 
 					const rootObjectId = modelData.versions.items[0].referencedObject;
 
-					// Step 2a: Download root object to get __closure
-					const rootObjectOptions: IHttpRequestOptions = {
-						method: 'GET',
-						url: `${domain}/objects/${projectId}/${rootObjectId}/single`,
-						headers: {
-							Accept: 'text/plain',
-							Authorization: `Bearer ${token}`,
+					// Step 2: Initialize ObjectLoader2
+					loader = ObjectLoader2Factory.createFromUrl({
+						serverUrl: domain,
+						streamId: projectId,
+						objectId: rootObjectId,
+						token: token,
+						attributeMask: {
+							exclude: [
+								'vertices',
+								'faces',
+								'colors',
+								'__closure',
+								'encodedValue',
+								'displayValue',
+								'renderMaterialProxies',
+								'instanceDefinitionProxies',
+								'transform',
+							],
 						},
-						json: true,
-					};
-
-					const rootObject = await this.helpers.httpRequest(rootObjectOptions);
-
-					// Step 2b: Extract all child object IDs from __closure
-					const childIds = Object.keys((rootObject as any).__closure || {});
-
-					// Attributes to remove from objects
-					const attributesToRemove = ['vertices', 'faces', 'colors', '__closure', 'encodedValue', 'displayValue','renderMaterialProxies', 'instanceDefinitionProxies', 'transform']
-
-					// If no children, return just the filtered root object
-					if (childIds.length === 0) {
-						const cleanedRoot = { ...(rootObject as any) };
-						attributesToRemove.forEach((attr) => {
-							delete cleanedRoot[attr];
-						});
-
-						returnData.push({
-							json: [cleanedRoot] as any,
-							pairedItem: itemIndex,
-						});
-						continue;
-					}
-
-					// Step 2c: Download all children with attribute masking
-					const childrenOptions: IHttpRequestOptions = {
-						method: 'POST',
-						url: `${domain}/api/v2/projects/${projectId}/object-stream/`,
-						headers: {
-							Accept: 'text/plain',
-							'Content-Type': 'application/json',
-							Authorization: `Bearer ${token}`,
+						options: {
+							useCache: false,
 						},
-						body: {
-							objectIds: childIds,
-							attributeMask: {
-								exclude: attributesToRemove,
-							},
-						},
-						json: false,
-					};
-
-					const childrenResponse = await this.helpers.httpRequest(childrenOptions);
-
-					// Parse NDJSON response (format: objectId\tJSON\n per line)
-					const childrenArray = (childrenResponse as string)
-						.split('\n')
-						.filter((line: string) => line.trim())
-						.map((line: string) => {
-							const [, jsonString] = line.split('\t');
-							return JSON.parse(jsonString);
-						});
-
-					// Step 2d: Filter root object attributes (client-side)
-					const cleanedRoot = { ...(rootObject as any) };
-					attributesToRemove.forEach((attr) => {
-						delete cleanedRoot[attr];
 					});
 
-					// Step 2e: Combine root + children
-					const allObjects = [cleanedRoot, ...childrenArray];
+					// Step 3: Download objects using iterator
+					const objects: any[] = [];
+					for await (const obj of loader.getObjectIterator()) {
+						objects.push(obj);
+					}
+
+					// Step 4: Resolve missing references
+					await resolveMissingReferences(loader, objects);
 
 					// Return combined array
 					returnData.push({
-						json: allObjects as any,
+						json: objects as any,
 						pairedItem: itemIndex,
 					});
 				} catch (error) {
@@ -254,6 +287,15 @@ export class Speckle implements INodeType {
 						});
 					} else {
 						throw error;
+					}
+				} finally {
+					// Always cleanup loader resources
+					if (loader) {
+						try {
+							await loader.disposeAsync();
+						} catch (disposeError) {
+							// Silently ignore disposal errors
+						}
 					}
 				}
 			}
