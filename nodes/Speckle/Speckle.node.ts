@@ -529,7 +529,7 @@ export class Speckle implements INodeType {
 						url: graphqlUrl,
 						headers: {
 							'Content-Type': 'application/json',
-							Authorization: `Bearer ${token}`,
+							Authorization: token,
 						},
 						body: graphqlQuery,
 						json: true,

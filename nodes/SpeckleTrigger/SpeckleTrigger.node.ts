@@ -63,14 +63,8 @@ export class SpeckleTrigger implements INodeType {
 
 		// Get credentials
 		const credentials = await this.getCredentials('speckleApi');
-		const rawToken = credentials.token as string;
+		const authToken = (credentials.token as string).trim();
 		const domain = (credentials.domain as string) || 'https://app.speckle.systems';
-
-		// Smart token handling - detect if "Bearer" prefix already exists
-		const token = rawToken.trim();
-		const authToken = token.startsWith('Bearer ') ? token : `Bearer ${token}`;
-
-		// Token is cleaned and ready
 
 		// Convert HTTP(S) URL to WebSocket URL
 		const wsUrl = domain.replace(/^http/, 'ws') + '/graphql';
