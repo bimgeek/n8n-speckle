@@ -421,8 +421,8 @@ export class Speckle implements INodeType {
 
 			// Merge the flattened record with current state
 			const combinedRecord = {
-				...flattened,
 				...state.FlattenedRecord,
+				...flattened,
 			};
 
 			// Merge Sets for O(n) deduplication instead of O(n²)
