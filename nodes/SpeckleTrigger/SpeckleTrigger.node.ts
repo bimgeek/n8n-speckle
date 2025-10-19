@@ -40,13 +40,6 @@ export class SpeckleTrigger implements INodeType {
 				placeholder: 'https://app.speckle.systems/projects/{projectId}/models/{modelId}',
 				description: 'The Speckle model URL to monitor for new versions',
 			},
-			{
-				displayName: 'Include Version Metadata',
-				name: 'includeMetadata',
-				type: 'boolean',
-				default: true,
-				description: 'Whether to include full version metadata in the trigger output',
-			},
 		],
 	};
 
