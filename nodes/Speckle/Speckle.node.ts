@@ -174,20 +174,20 @@ export class Speckle implements INodeType {
 
 		/**
 		 * Resolve field name conflicts by appending parent path segments
+		 * Uses Set for O(1) lookup performance instead of O(n) array search
 		 */
 		const resolveFieldName = (
 			fieldName: string,
 			parentPath: string | null,
-			existingFields: string[],
+			existingFieldsSet: Set<string>,
 		): string => {
 			const currentParentPath = parentPath || '';
-			const currentExistingFields = existingFields || [];
 
 			// Try the original field name first
 			const candidateName = fieldName;
 
-			// Case 1: No conflict - return original name
-			if (!currentExistingFields.includes(candidateName)) {
+			// Case 1: No conflict - return original name (O(1) Set lookup)
+			if (!existingFieldsSet.has(candidateName)) {
 				return candidateName;
 			}
 
@@ -210,9 +210,9 @@ export class Speckle implements INodeType {
 				candidates.push(candidate);
 			}
 
-			// Find the first candidate that doesn't conflict
+			// Find the first candidate that doesn't conflict (O(1) Set lookup)
 			for (const candidate of candidates) {
-				if (!currentExistingFields.includes(candidate)) {
+				if (!existingFieldsSet.has(candidate)) {
 					return candidate;
 				}
 			}
@@ -230,6 +230,7 @@ export class Speckle implements INodeType {
 
 		/**
 		 * Main flattening function - must be declared before the processing functions
+		 * Uses Set for O(1) field name lookup performance
 		 */
 		const flattenRecordImpl = (
 			inputRecord: any,
@@ -267,9 +268,10 @@ export class Speckle implements INodeType {
 			// Process all fields in the record
 			const fieldNames = Object.keys(recordToProcess);
 
-			// Initialize state
+			// Initialize state with both Set (for fast lookup) and Array (for order)
 			let state = {
 				FlattenedRecord: {},
+				ExistingFieldsSet: new Set<string>(currentExistingFields),
 				ExistingFieldsList: currentExistingFields,
 			};
 
@@ -290,8 +292,8 @@ export class Speckle implements INodeType {
 			fieldValue: any,
 			currentParentPath: string,
 			filterKeys: string[] | null,
-			state: { FlattenedRecord: any; ExistingFieldsList: string[] },
-		): { FlattenedRecord: any; ExistingFieldsList: string[] } => {
+			state: { FlattenedRecord: any; ExistingFieldsSet: Set<string>; ExistingFieldsList: string[] },
+		): { FlattenedRecord: any; ExistingFieldsSet: Set<string>; ExistingFieldsList: string[] } => {
 			// Build the new path for this field
 			const newPath = currentParentPath === '' ? fieldName : `${currentParentPath}.${fieldName}`;
 
@@ -330,8 +332,8 @@ export class Speckle implements INodeType {
 			fieldValue: any,
 			currentParentPath: string,
 			filterKeys: string[] | null,
-			state: { FlattenedRecord: any; ExistingFieldsList: string[] },
-		): { FlattenedRecord: any; ExistingFieldsList: string[] } => {
+			state: { FlattenedRecord: any; ExistingFieldsSet: Set<string>; ExistingFieldsList: string[] },
+		): { FlattenedRecord: any; ExistingFieldsSet: Set<string>; ExistingFieldsList: string[] } => {
 			const nameField = fieldValue.name;
 			const valueField = fieldValue.value;
 
@@ -340,8 +342,8 @@ export class Speckle implements INodeType {
 				return state;
 			}
 
-			// Resolve any naming conflicts
-			const resolvedName = resolveFieldName(nameField, currentParentPath, state.ExistingFieldsList);
+			// Resolve any naming conflicts (uses Set for O(1) lookup)
+			const resolvedName = resolveFieldName(nameField, currentParentPath, state.ExistingFieldsSet);
 
 			// Add to flattened record
 			const newRecord = {
@@ -349,11 +351,14 @@ export class Speckle implements INodeType {
 				[resolvedName]: valueField,
 			};
 
-			// Update existing fields list
+			// Update both Set and Array with the resolved name
+			const newFieldsSet = new Set(state.ExistingFieldsSet);
+			newFieldsSet.add(resolvedName);
 			const newFieldsList = [...state.ExistingFieldsList, resolvedName];
 
 			return {
 				FlattenedRecord: newRecord,
+				ExistingFieldsSet: newFieldsSet,
 				ExistingFieldsList: newFieldsList,
 			};
 		};
@@ -365,10 +370,10 @@ export class Speckle implements INodeType {
 			fieldName: string,
 			currentParentPath: string,
 			filterKeys: string[] | null,
-			state: { FlattenedRecord: any; ExistingFieldsList: string[] },
-		): { FlattenedRecord: any; ExistingFieldsList: string[] } => {
-			// Resolve naming conflicts
-			const resolvedName = resolveFieldName(fieldName, currentParentPath, state.ExistingFieldsList);
+			state: { FlattenedRecord: any; ExistingFieldsSet: Set<string>; ExistingFieldsList: string[] },
+		): { FlattenedRecord: any; ExistingFieldsSet: Set<string>; ExistingFieldsList: string[] } => {
+			// Resolve naming conflicts (uses Set for O(1) lookup)
+			const resolvedName = resolveFieldName(fieldName, currentParentPath, state.ExistingFieldsSet);
 
 			// Add null value to flattened record
 			const newRecord = {
@@ -376,10 +381,14 @@ export class Speckle implements INodeType {
 				[resolvedName]: null,
 			};
 
+			// Update both Set and Array with the resolved name
+			const newFieldsSet = new Set(state.ExistingFieldsSet);
+			newFieldsSet.add(resolvedName);
 			const newFieldsList = [...state.ExistingFieldsList, resolvedName];
 
 			return {
 				FlattenedRecord: newRecord,
+				ExistingFieldsSet: newFieldsSet,
 				ExistingFieldsList: newFieldsList,
 			};
 		};
@@ -391,8 +400,8 @@ export class Speckle implements INodeType {
 			fieldValue: any,
 			newPath: string,
 			filterKeys: string[] | null,
-			state: { FlattenedRecord: any; ExistingFieldsList: string[] },
-		): { FlattenedRecord: any; ExistingFieldsList: string[] } => {
+			state: { FlattenedRecord: any; ExistingFieldsSet: Set<string>; ExistingFieldsList: string[] },
+		): { FlattenedRecord: any; ExistingFieldsSet: Set<string>; ExistingFieldsList: string[] } => {
 			// Skip empty records
 			const fieldCount = Object.keys(fieldValue).length;
 			if (fieldCount === 0) {
@@ -411,13 +420,13 @@ export class Speckle implements INodeType {
 				...state.FlattenedRecord,
 			};
 
-			// Update existing fields list with all fields from both records (remove duplicates)
-			const allFieldNames = [...state.ExistingFieldsList, ...flattenedFieldNames].filter(
-				(value, index, self) => self.indexOf(value) === index,
-			);
+			// Merge Sets for O(n) deduplication instead of O(n²)
+			const allFieldsSet = new Set([...state.ExistingFieldsSet, ...flattenedFieldNames]);
+			const allFieldNames = Array.from(allFieldsSet);
 
 			return {
 				FlattenedRecord: combinedRecord,
+				ExistingFieldsSet: allFieldsSet,
 				ExistingFieldsList: allFieldNames,
 			};
 		};
@@ -430,10 +439,10 @@ export class Speckle implements INodeType {
 			fieldValue: any,
 			currentParentPath: string,
 			filterKeys: string[] | null,
-			state: { FlattenedRecord: any; ExistingFieldsList: string[] },
-		): { FlattenedRecord: any; ExistingFieldsList: string[] } => {
-			// Resolve naming conflicts
-			const resolvedName = resolveFieldName(fieldName, currentParentPath, state.ExistingFieldsList);
+			state: { FlattenedRecord: any; ExistingFieldsSet: Set<string>; ExistingFieldsList: string[] },
+		): { FlattenedRecord: any; ExistingFieldsSet: Set<string>; ExistingFieldsList: string[] } => {
+			// Resolve naming conflicts (uses Set for O(1) lookup)
+			const resolvedName = resolveFieldName(fieldName, currentParentPath, state.ExistingFieldsSet);
 
 			// Add primitive value to flattened record
 			const newRecord = {
@@ -441,10 +450,14 @@ export class Speckle implements INodeType {
 				[resolvedName]: fieldValue,
 			};
 
+			// Update both Set and Array with the resolved name
+			const newFieldsSet = new Set(state.ExistingFieldsSet);
+			newFieldsSet.add(resolvedName);
 			const newFieldsList = [...state.ExistingFieldsList, resolvedName];
 
 			return {
 				FlattenedRecord: newRecord,
+				ExistingFieldsSet: newFieldsSet,
 				ExistingFieldsList: newFieldsList,
 			};
 		};
