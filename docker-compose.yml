@@ -8,11 +8,14 @@ services:
     restart: unless-stopped
     ports:
       - "5678:5678"
+      - "9229:9229"
     environment:
       - N8N_CUSTOM_EXTENSIONS=/home/node/.n8n/custom
       - N8N_DEFAULT_BINARY_DATA_MODE=filesystem
       - N8N_BINARY_DATA_STORAGE_PATH=/home/node/.n8n/binary-data
       - NODE_FUNCTION_ALLOW_EXTERNAL=*
+      - NODE_ENV=development
+      - NODE_OPTIONS=--inspect=0.0.0.0:9229
     volumes:
       - n8n_data:/home/node/.n8n
       - ./dist:/home/node/.n8n/custom:ro
