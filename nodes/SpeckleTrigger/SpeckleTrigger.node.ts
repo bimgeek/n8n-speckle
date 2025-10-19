@@ -184,10 +184,18 @@ export class SpeckleTrigger implements INodeType {
 		// Function to close the connection
 		async function closeFunction() {
 			if (subscription) {
-				subscription.unsubscribe();
+				try {
+					subscription.unsubscribe();
+				} catch (err) {
+					// Silently ignore
+				}
 			}
 			if (client) {
-				client.close();
+				try {
+					client.close();
+				} catch (err) {
+					// Silently ignore
+				}
 			}
 		}
 
