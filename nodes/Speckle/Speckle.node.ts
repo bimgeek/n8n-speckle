@@ -700,6 +700,15 @@ export class Speckle implements INodeType {
 					// Get input data from previous node
 					const inputData = items[itemIndex].json;
 
+					// Validate input (should be an object, not an array)
+					if (Array.isArray(inputData)) {
+						throw new NodeOperationError(
+							this.getNode(),
+							'Query Properties expects individual objects, not arrays. Connect to Query Objects output.',
+							{ itemIndex },
+						);
+					}
+
 					// Flatten the properties using the algorithm
 					const flattenedProperties = flattenRecordImpl(inputData, null, null, null);
 
