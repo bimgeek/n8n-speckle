@@ -35,7 +35,7 @@ export class SpeckleApi implements ICredentialType {
 		type: 'generic',
 		properties: {
 			headers: {
-				Authorization: '={{"Bearer " + $credentials.token}}',
+				Authorization: '={{$credentials.token}}',
 			},
 		},
 	};

@@ -6,6 +6,7 @@ import type {
 	IHttpRequestOptions,
 } from 'n8n-workflow';
 import { NodeOperationError } from 'n8n-workflow';
+import { ObjectLoader2Factory } from '@speckle/objectloader2';
 import { httpVerbFields, httpVerbOperations } from './HttpVerbDescription';
 import { modelFields, modelOperations } from './LoadModelDescription';
 
@@ -81,9 +82,396 @@ export class Speckle implements INodeType {
 		const resource = this.getNodeParameter('resource', 0) as string;
 		const operation = this.getNodeParameter('operation', 0) as string;
 
+		/**
+		 * Extract all referencedId properties from an object recursively
+		 */
+		const extractReferencedIds = (obj: any, referencedIds: Set<string>): void => {
+			if (!obj || typeof obj !== 'object') return;
+
+			// Check for referencedId property
+			if (obj.referencedId && typeof obj.referencedId === 'string') {
+				referencedIds.add(obj.referencedId);
+			}
+
+			// Recursively check all properties
+			for (const value of Object.values(obj)) {
+				if (value && typeof value === 'object') {
+					extractReferencedIds(value, referencedIds);
+				}
+			}
+		};
+
+		/**
+		 * Resolve missing object references by iteratively fetching them
+		 */
+		const resolveMissingReferences = async (loader: any, objects: any[]): Promise<void> => {
+			const MAX_ITERATIONS = 10;
+			let iterationCount = 0;
+
+			while (iterationCount < MAX_ITERATIONS) {
+				iterationCount++;
+
+				// Build set of existing object IDs
+				const existingIds = new Set(objects.map((obj: any) => obj.id));
+
+				// Find all referenced IDs
+				const referencedIds = new Set<string>();
+				for (const obj of objects) {
+					extractReferencedIds(obj, referencedIds);
+				}
+
+				// Find missing IDs
+				const missingIds = new Set<string>();
+				for (const refId of referencedIds) {
+					if (!existingIds.has(refId)) {
+						missingIds.add(refId);
+					}
+				}
+
+				// Exit if no missing references
+				if (missingIds.size === 0) {
+					break;
+				}
+
+				// Fetch missing objects in parallel for better performance
+				const missingIdsArray = Array.from(missingIds);
+				const fetchPromises = missingIdsArray.map(async (missingId) => {
+					try {
+						return await loader.getObject({ id: missingId });
+					} catch (err: any) {
+						// Log warning but continue - this is expected for some reference types
+						this.logger.warn(`Failed to fetch referenced object ${missingId}: ${err.message}`);
+						return null;
+					}
+				});
+
+				const results = await Promise.all(fetchPromises);
+				results.forEach((obj) => {
+					if (obj) {
+						objects.push(obj);
+					}
+				});
+			}
+		};
+
+		/**
+		 * Properties Flattening Algorithm - Helper Functions
+		 */
+
+		/**
+		 * Check if a path should be excluded from flattening
+		 */
+		const isPathExcluded = (currentPath: string): boolean => {
+			const EXCLUDED_PATHS = [
+				'Composite Structure',
+				'Material Quantities',
+				'Parameters.Type Parameters.Structure',
+			];
+
+			for (const excludedPath of EXCLUDED_PATHS) {
+				if (currentPath.includes(excludedPath)) {
+					return true;
+				}
+			}
+
+			return false;
+		};
+
+		/**
+		 * Resolve field name conflicts by appending parent path segments
+		 * Uses Set for O(1) lookup performance instead of O(n) array search
+		 */
+		const resolveFieldName = (
+			fieldName: string,
+			parentPath: string | null,
+			existingFieldsSet: Set<string>,
+		): string => {
+			const currentParentPath = parentPath || '';
+
+			// Try the original field name first
+			const candidateName = fieldName;
+
+			// Case 1: No conflict - return original name (O(1) Set lookup)
+			if (!existingFieldsSet.has(candidateName)) {
+				return candidateName;
+			}
+
+			// Case 2: Conflict exists but no parent path available - keep original
+			if (currentParentPath === '') {
+				return fieldName;
+			}
+
+			// Case 3: Conflict exists and parent path available - resolve with iteration
+			const pathParts = currentParentPath.split('.');
+			const reversedParts = pathParts.reverse();
+
+			// Generate candidate names by appending parents one by one
+			const candidates: string[] = [];
+
+			for (let depth = 1; depth <= reversedParts.length; depth++) {
+				const parentSegments = reversedParts.slice(0, depth);
+				const parentSuffix = parentSegments.join('.');
+				const candidate = `${fieldName}.${parentSuffix}`;
+				candidates.push(candidate);
+			}
+
+			// Find the first candidate that doesn't conflict (O(1) Set lookup)
+			for (const candidate of candidates) {
+				if (!existingFieldsSet.has(candidate)) {
+					return candidate;
+				}
+			}
+
+			// If all candidates conflict, use the full path (last candidate)
+			return candidates[candidates.length - 1];
+		};
+
+		/**
+		 * Check if value is a record/object
+		 */
+		const isRecord = (value: any): boolean => {
+			return value !== null && typeof value === 'object' && !Array.isArray(value);
+		};
+
+		/**
+		 * Main flattening function - must be declared before the processing functions
+		 * Uses Set for O(1) field name lookup performance
+		 */
+		const flattenRecordImpl = (
+			inputRecord: any,
+			filterKeys: string[] | null,
+			parentPath: string | null,
+			existingFields: string[] | null,
+		): any => {
+			// Initialize parameters with defaults
+			const currentParentPath = parentPath || '';
+			const currentExistingFields = existingFields || [];
+
+			// Extract the "properties" field if it exists
+			let recordToProcess = null;
+
+			if (inputRecord === null) {
+				recordToProcess = null;
+			} else if (isRecord(inputRecord) && 'properties' in inputRecord) {
+				// Use the properties field instead of root record
+				recordToProcess = inputRecord.properties;
+			} else {
+				recordToProcess = inputRecord;
+			}
+
+			// Handle null input
+			if (recordToProcess === null) {
+				return {};
+			}
+
+			// Ensure input is a record (object)
+			if (!isRecord(recordToProcess)) {
+				// Wrap non-record values
+				return { Value: recordToProcess };
+			}
+
+			// Process all fields in the record
+			const fieldNames = Object.keys(recordToProcess);
+
+			// Initialize state with both Set (for fast lookup) and Array (for order)
+			let state = {
+				FlattenedRecord: {},
+				ExistingFieldsSet: new Set<string>(currentExistingFields),
+				ExistingFieldsList: currentExistingFields,
+			};
+
+			// Process each field sequentially (accumulation pattern)
+			for (const fieldName of fieldNames) {
+				state = processField(fieldName, recordToProcess[fieldName], currentParentPath, filterKeys, state);
+			}
+
+			// Return the flattened record
+			return state.FlattenedRecord;
+		};
+
+		/**
+		 * Process a single field
+		 */
+		const processField = (
+			fieldName: string,
+			fieldValue: any,
+			currentParentPath: string,
+			filterKeys: string[] | null,
+			state: { FlattenedRecord: any; ExistingFieldsSet: Set<string>; ExistingFieldsList: string[] },
+		): { FlattenedRecord: any; ExistingFieldsSet: Set<string>; ExistingFieldsList: string[] } => {
+			// Build the new path for this field
+			const newPath = currentParentPath === '' ? fieldName : `${currentParentPath}.${fieldName}`;
+
+			// Step 1: Check if path should be excluded
+			if (isPathExcluded(newPath)) {
+				return state; // Skip this field
+			}
+
+			// Step 2: Determine field type and process accordingly
+
+			// Case A: Field is a name/value record
+			if (isRecord(fieldValue) && 'name' in fieldValue && 'value' in fieldValue) {
+				return processNameValueRecord(fieldValue, currentParentPath, filterKeys, state);
+			}
+
+			// Case B: Field value is null
+			else if (fieldValue === null) {
+				return processNullValue(fieldName, currentParentPath, filterKeys, state);
+			}
+
+			// Case C: Field value is a nested record
+			else if (isRecord(fieldValue)) {
+				return processNestedRecord(fieldValue, newPath, filterKeys, state);
+			}
+
+			// Case D: Field value is a primitive (string, number, boolean) or array
+			else {
+				return processPrimitiveValue(fieldName, fieldValue, currentParentPath, filterKeys, state);
+			}
+		};
+
+		/**
+		 * Process name/value record pattern
+		 */
+		const processNameValueRecord = (
+			fieldValue: any,
+			currentParentPath: string,
+			filterKeys: string[] | null,
+			state: { FlattenedRecord: any; ExistingFieldsSet: Set<string>; ExistingFieldsList: string[] },
+		): { FlattenedRecord: any; ExistingFieldsSet: Set<string>; ExistingFieldsList: string[] } => {
+			const nameField = fieldValue.name;
+			const valueField = fieldValue.value;
+
+			// Check if nameField is null
+			if (nameField === null) {
+				return state;
+			}
+
+			// Resolve any naming conflicts (uses Set for O(1) lookup)
+			const resolvedName = resolveFieldName(nameField, currentParentPath, state.ExistingFieldsSet);
+
+			// Add to flattened record
+			const newRecord = {
+				...state.FlattenedRecord,
+				[resolvedName]: valueField,
+			};
+
+			// Update both Set and Array with the resolved name
+			const newFieldsSet = new Set(state.ExistingFieldsSet);
+			newFieldsSet.add(resolvedName);
+			const newFieldsList = [...state.ExistingFieldsList, resolvedName];
+
+			return {
+				FlattenedRecord: newRecord,
+				ExistingFieldsSet: newFieldsSet,
+				ExistingFieldsList: newFieldsList,
+			};
+		};
+
+		/**
+		 * Process null value
+		 */
+		const processNullValue = (
+			fieldName: string,
+			currentParentPath: string,
+			filterKeys: string[] | null,
+			state: { FlattenedRecord: any; ExistingFieldsSet: Set<string>; ExistingFieldsList: string[] },
+		): { FlattenedRecord: any; ExistingFieldsSet: Set<string>; ExistingFieldsList: string[] } => {
+			// Resolve naming conflicts (uses Set for O(1) lookup)
+			const resolvedName = resolveFieldName(fieldName, currentParentPath, state.ExistingFieldsSet);
+
+			// Add null value to flattened record
+			const newRecord = {
+				...state.FlattenedRecord,
+				[resolvedName]: null,
+			};
+
+			// Update both Set and Array with the resolved name
+			const newFieldsSet = new Set(state.ExistingFieldsSet);
+			newFieldsSet.add(resolvedName);
+			const newFieldsList = [...state.ExistingFieldsList, resolvedName];
+
+			return {
+				FlattenedRecord: newRecord,
+				ExistingFieldsSet: newFieldsSet,
+				ExistingFieldsList: newFieldsList,
+			};
+		};
+
+		/**
+		 * Process nested record (recursion)
+		 */
+		const processNestedRecord = (
+			fieldValue: any,
+			newPath: string,
+			filterKeys: string[] | null,
+			state: { FlattenedRecord: any; ExistingFieldsSet: Set<string>; ExistingFieldsList: string[] },
+		): { FlattenedRecord: any; ExistingFieldsSet: Set<string>; ExistingFieldsList: string[] } => {
+			// Skip empty records
+			const fieldCount = Object.keys(fieldValue).length;
+			if (fieldCount === 0) {
+				return state;
+			}
+
+			// Recursively flatten the nested record
+			const flattened = flattenRecordImpl(fieldValue, filterKeys, newPath, state.ExistingFieldsList);
+
+			// Get all field names from the flattened result
+			const flattenedFieldNames = Object.keys(flattened);
+
+			// Merge the flattened record with current state
+			const combinedRecord = {
+				...state.FlattenedRecord,
+				...flattened,
+			};
+
+			// Merge Sets for O(n) deduplication instead of O(n²)
+			const allFieldsSet = new Set([...state.ExistingFieldsSet, ...flattenedFieldNames]);
+			const allFieldNames = Array.from(allFieldsSet);
+
+			return {
+				FlattenedRecord: combinedRecord,
+				ExistingFieldsSet: allFieldsSet,
+				ExistingFieldsList: allFieldNames,
+			};
+		};
+
+		/**
+		 * Process primitive value
+		 */
+		const processPrimitiveValue = (
+			fieldName: string,
+			fieldValue: any,
+			currentParentPath: string,
+			filterKeys: string[] | null,
+			state: { FlattenedRecord: any; ExistingFieldsSet: Set<string>; ExistingFieldsList: string[] },
+		): { FlattenedRecord: any; ExistingFieldsSet: Set<string>; ExistingFieldsList: string[] } => {
+			// Resolve naming conflicts (uses Set for O(1) lookup)
+			const resolvedName = resolveFieldName(fieldName, currentParentPath, state.ExistingFieldsSet);
+
+			// Add primitive value to flattened record
+			const newRecord = {
+				...state.FlattenedRecord,
+				[resolvedName]: fieldValue,
+			};
+
+			// Update both Set and Array with the resolved name
+			const newFieldsSet = new Set(state.ExistingFieldsSet);
+			newFieldsSet.add(resolvedName);
+			const newFieldsList = [...state.ExistingFieldsList, resolvedName];
+
+			return {
+				FlattenedRecord: newRecord,
+				ExistingFieldsSet: newFieldsSet,
+				ExistingFieldsList: newFieldsList,
+			};
+		};
+
 		// Handle Model resource with programmatic logic
 		if (resource === 'model' && operation === 'loadModel') {
 			for (let itemIndex = 0; itemIndex < items.length; itemIndex++) {
+				let loader: any = null;
+
 				try {
 					const modelUrl = this.getNodeParameter('modelUrl', itemIndex) as string;
 
@@ -141,7 +529,7 @@ export class Speckle implements INodeType {
 						url: graphqlUrl,
 						headers: {
 							'Content-Type': 'application/json',
-							Authorization: `Bearer ${token}`,
+							Authorization: token,
 						},
 						body: graphqlQuery,
 						json: true,
@@ -170,80 +558,42 @@ export class Speckle implements INodeType {
 
 					const rootObjectId = modelData.versions.items[0].referencedObject;
 
-					// Step 2a: Download root object to get __closure
-					const rootObjectOptions: IHttpRequestOptions = {
-						method: 'GET',
-						url: `${domain}/objects/${projectId}/${rootObjectId}/single`,
-						headers: {
-							Accept: 'text/plain',
-							Authorization: `Bearer ${token}`,
+					// Step 2: Initialize ObjectLoader2
+					loader = ObjectLoader2Factory.createFromUrl({
+						serverUrl: domain,
+						streamId: projectId,
+						objectId: rootObjectId,
+						token: token,
+						attributeMask: {
+							exclude: [
+								'vertices',
+								'faces',
+								'colors',
+								'__closure',
+								'encodedValue',
+								'displayValue',
+								'renderMaterialProxies',
+								'instanceDefinitionProxies',
+								'transform',
+							],
 						},
-						json: true,
-					};
-
-					const rootObject = await this.helpers.httpRequest(rootObjectOptions);
-
-					// Step 2b: Extract all child object IDs from __closure
-					const childIds = Object.keys((rootObject as any).__closure || {});
-
-					// Attributes to remove from objects
-					const attributesToRemove = ['vertices', 'faces', 'colors', '__closure', 'encodedValue', 'displayValue','renderMaterialProxies', 'instanceDefinitionProxies', 'transform']
-
-					// If no children, return just the filtered root object
-					if (childIds.length === 0) {
-						const cleanedRoot = { ...(rootObject as any) };
-						attributesToRemove.forEach((attr) => {
-							delete cleanedRoot[attr];
-						});
-
-						returnData.push({
-							json: [cleanedRoot] as any,
-							pairedItem: itemIndex,
-						});
-						continue;
-					}
-
-					// Step 2c: Download all children with attribute masking
-					const childrenOptions: IHttpRequestOptions = {
-						method: 'POST',
-						url: `${domain}/api/v2/projects/${projectId}/object-stream/`,
-						headers: {
-							Accept: 'text/plain',
-							'Content-Type': 'application/json',
-							Authorization: `Bearer ${token}`,
+						options: {
+							useCache: false,
 						},
-						body: {
-							objectIds: childIds,
-							attributeMask: {
-								exclude: attributesToRemove,
-							},
-						},
-						json: false,
-					};
-
-					const childrenResponse = await this.helpers.httpRequest(childrenOptions);
-
-					// Parse NDJSON response (format: objectId\tJSON\n per line)
-					const childrenArray = (childrenResponse as string)
-						.split('\n')
-						.filter((line: string) => line.trim())
-						.map((line: string) => {
-							const [, jsonString] = line.split('\t');
-							return JSON.parse(jsonString);
-						});
-
-					// Step 2d: Filter root object attributes (client-side)
-					const cleanedRoot = { ...(rootObject as any) };
-					attributesToRemove.forEach((attr) => {
-						delete cleanedRoot[attr];
 					});
 
-					// Step 2e: Combine root + children
-					const allObjects = [cleanedRoot, ...childrenArray];
+					// Step 3: Download objects using iterator
+					const objects: any[] = [];
+					for await (const obj of loader.getObjectIterator()) {
+						objects.push(obj);
+					}
+
+					// Step 4: Resolve missing references
+					await resolveMissingReferences(loader, objects);
 
 					// Return combined array
 					returnData.push({
-						json: allObjects as any,
+						json: objects as any,
 						pairedItem: itemIndex,
 					});
 				} catch (error) {
@@ -254,6 +604,15 @@ export class Speckle implements INodeType {
 						});
 					} else {
 						throw error;
+					}
+				} finally {
+					// Always cleanup loader resources
+					if (loader) {
+						try {
+							await loader.disposeAsync();
+						} catch (disposeError) {
+							// Silently ignore disposal errors
+						}
 					}
 				}
 			}
@@ -323,6 +682,45 @@ export class Speckle implements INodeType {
 							json: obj,
 							pairedItem: itemIndex,
 						});
+					});
+				} catch (error) {
+					if (this.continueOnFail()) {
+						returnData.push({
+							json: { error: error.message },
+							pairedItem: itemIndex,
+						});
+					} else {
+						throw error;
+					}
+				}
+			}
+
+			return [returnData];
+		}
+
+		// Handle Query Properties operation
+		if (resource === 'model' && operation === 'queryProperties') {
+			for (let itemIndex = 0; itemIndex < items.length; itemIndex++) {
+				try {
+					// Get input data from previous node
+					const inputData = items[itemIndex].json;
+
+					// Validate input (should be an object, not an array)
+					if (Array.isArray(inputData)) {
+						throw new NodeOperationError(
+							this.getNode(),
+							'Query Properties expects individual objects, not arrays. Connect to Query Objects output.',
+							{ itemIndex },
+						);
+					}
+
+					// Flatten the properties using the algorithm
+					const flattenedProperties = flattenRecordImpl(inputData, null, null, null);
+
+					// Return flattened object as a new item
+					returnData.push({
+						json: flattenedProperties,
+						pairedItem: itemIndex,
 					});
 				} catch (error) {
 					if (this.continueOnFail()) {
