@@ -72,7 +72,7 @@ Demonstrates declarative routing patterns for simple API operations:
 
 - Node.js 20.15 or higher
 - Docker and Docker Compose (for local development)
-- n8n instance (local or cloud)
+- n8n 2.3.4 or higher (local Docker setup uses pinned version)
 
 ### Setup
 
@@ -96,7 +96,23 @@ Demonstrates declarative routing patterns for simple API operations:
 
 ### Docker Setup (Recommended)
 
-The project includes a Docker Compose configuration for local development:
+The project includes a Docker Compose configuration for local development with n8n 2.3.4.
+
+#### Environment Variables
+
+The Docker setup includes the following n8n configuration:
+
+| Variable | Value | Description |
+|----------|-------|-------------|
+| `N8N_CUSTOM_EXTENSIONS` | `/home/node/.n8n/custom` | Custom nodes directory |
+| `N8N_DEFAULT_BINARY_DATA_MODE` | `filesystem` | Store binary data on disk |
+| `NODE_FUNCTION_ALLOW_EXTERNAL` | `*` | Allow external npm packages in Code nodes |
+| `N8N_BLOCK_ENV_ACCESS_IN_NODE` | `false` | Allow environment variable access in Code nodes |
+| `N8N_RUNNERS_ENABLED` | `false` | Disable task runners for simpler setup |
+| `N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS` | `false` | Skip file permission checks (macOS compatibility) |
+| `NODE_PATH` | `/usr/local/lib/node_modules` | Include global modules for dependencies |
+
+#### Quick Start
 
 1. **Start n8n with your custom nodes:**
    ```bash
@@ -120,6 +136,19 @@ The project includes a Docker Compose configuration for local development:
    ```bash
    docker-compose down
    ```
+
+#### Upgrading n8n Version
+
+To upgrade to a newer n8n version, update the version in `Dockerfile`:
+
+```dockerfile
+FROM n8nio/n8n:2.3.4  # Change to desired version
+```
+
+Then rebuild:
+```bash
+docker-compose build --no-cache && docker-compose up -d
+```
 
 ### npm link Setup (Alternative)
 
