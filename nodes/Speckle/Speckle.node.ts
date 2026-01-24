@@ -820,6 +820,7 @@ export class Speckle implements INodeType {
 											updatedAt
 											resourceIdString
 											viewerState
+											previewUrl
 											${repliesFragment}
 										}
 									}
@@ -920,6 +921,7 @@ export class Speckle implements INodeType {
 							url: issueUrl,
 							objectIds,
 							applicationIds,
+							previewUrl: issue.previewUrl || null,
 						};
 
 						// Add replies if requested
