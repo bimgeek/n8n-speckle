@@ -8,6 +8,7 @@ import type {
 import { NodeOperationError } from 'n8n-workflow';
 import { ObjectLoader2Factory } from '@speckle/objectloader2';
 import { httpVerbFields, httpVerbOperations } from './HttpVerbDescription';
+import { issuesFields, issuesOperations } from './IssuesDescription';
 import { modelFields, modelOperations } from './LoadModelDescription';
 
 export class Speckle implements INodeType {
@@ -62,6 +63,10 @@ export class Speckle implements INodeType {
 						value: 'model',
 					},
 					{
+						name: 'Issues',
+						value: 'issues',
+					},
+					{
 						name: 'HTTP Verb',
 						value: 'httpVerb',
 					},
@@ -71,6 +76,8 @@ export class Speckle implements INodeType {
 
 			...modelOperations,
 			...modelFields,
+			...issuesOperations,
+			...issuesFields,
 			...httpVerbOperations,
 			...httpVerbFields,
 		],
@@ -722,6 +729,223 @@ export class Speckle implements INodeType {
 						json: flattenedProperties,
 						pairedItem: itemIndex,
 					});
+				} catch (error) {
+					if (this.continueOnFail()) {
+						returnData.push({
+							json: { error: error.message },
+							pairedItem: itemIndex,
+						});
+					} else {
+						throw error;
+					}
+				}
+			}
+
+			return [returnData];
+		}
+
+		// Handle Get Issues operation
+		if (resource === 'issues' && operation === 'getIssues') {
+			for (let itemIndex = 0; itemIndex < items.length; itemIndex++) {
+				try {
+					const issuesUrl = this.getNodeParameter('issuesUrl', itemIndex) as string;
+					const getReplies = this.getNodeParameter('getReplies', itemIndex) as boolean;
+
+					// Parse the URL to extract components - supports project, model, and version URLs
+					// Project URL: https://app.speckle.systems/projects/{projectId}
+					// Model URL: https://app.speckle.systems/projects/{projectId}/models/{modelId}
+					// Version URL: https://app.speckle.systems/projects/{projectId}/models/{modelId}@{versionId}
+					const urlMatch = issuesUrl.match(
+						/^(https?:\/\/[^\/]+)\/projects\/([^\/]+)(?:\/models\/([^@\/]+))?(?:@([^\/]+))?$/,
+					);
+
+					if (!urlMatch) {
+						throw new NodeOperationError(
+							this.getNode(),
+							'Invalid Speckle URL. Expected format: https://server/projects/{projectId}[/models/{modelId}[@{versionId}]]',
+							{ itemIndex },
+						);
+					}
+
+					const [, baseUrl, projectId, modelId, versionId] = urlMatch;
+
+					// Get credentials
+					const credentials = await this.getCredentials('speckleApi');
+					const token = credentials.token as string;
+					let domain = (credentials.domain as string) || baseUrl;
+
+					// Remove trailing slash from domain if present
+					domain = domain.replace(/\/$/, '');
+
+					// Build the GraphQL query - conditionally include replies
+					const repliesFragment = getReplies
+						? `
+						replies(input: $repliesInput) {
+							items {
+								issueId
+								id
+								rawDescription
+								createdAt
+								author {
+									user {
+										name
+									}
+								}
+							}
+						}`
+						: '';
+
+					const graphqlQuery = {
+						query: `
+							query Project($projectId: String!, $input: ProjectIssuesInput${getReplies ? ', $repliesInput: IssueRepliesInput' : ''}) {
+								project(id: $projectId) {
+									issues(input: $input) {
+										items {
+											id
+											identifier
+											title
+											rawDescription
+											status
+											priority
+											assignee {
+												user {
+													name
+												}
+											}
+											dueDate
+											labels {
+												name
+											}
+											createdAt
+											updatedAt
+											resourceIdString
+											viewerState
+											${repliesFragment}
+										}
+									}
+								}
+							}
+						`,
+						variables: {
+							projectId,
+							input: {
+								limit: 10000,
+								...(versionId
+									? { resourceIdString: `${modelId}@${versionId}` }
+									: modelId
+										? { resourceIdString: modelId }
+										: {}),
+							},
+							...(getReplies ? { repliesInput: { limit: 10000 } } : {}),
+						},
+					};
+
+					const graphqlUrl = `${domain}/graphql`;
+					const graphqlOptions: IHttpRequestOptions = {
+						method: 'POST',
+						url: graphqlUrl,
+						headers: {
+							'Content-Type': 'application/json',
+							Authorization: token,
+						},
+						body: graphqlQuery,
+						json: true,
+					};
+
+					let graphqlResponse;
+					try {
+						graphqlResponse = await this.helpers.httpRequest(graphqlOptions);
+					} catch (error) {
+						throw new NodeOperationError(
+							this.getNode(),
+							`GraphQL request failed: ${error.message}. URL attempted: ${graphqlUrl}`,
+							{ itemIndex },
+						);
+					}
+
+					// Check for GraphQL errors first
+					if (graphqlResponse.errors && graphqlResponse.errors.length > 0) {
+						const errorMessages = graphqlResponse.errors
+							.map((e: { message: string }) => e.message)
+							.join('; ');
+						throw new NodeOperationError(
+							this.getNode(),
+							`GraphQL error: ${errorMessages}`,
+							{ itemIndex },
+						);
+					}
+
+					// Extract issues from the response
+					const issues = graphqlResponse.data?.project?.issues?.items;
+					if (!issues) {
+						throw new NodeOperationError(
+							this.getNode(),
+							'Failed to fetch issues. The project may not exist or you may not have permission to access it.',
+							{ itemIndex },
+						);
+					}
+
+					// Transform each issue into an n8n item
+					for (const issue of issues) {
+						// Extract object IDs and application IDs from viewerState
+						const viewerState = issue.viewerState;
+						const selectedObjectIds =
+							viewerState?.ui?.filters?.selectedObjectApplicationIds;
+						const objectIds = selectedObjectIds ? Object.keys(selectedObjectIds) : null;
+						const applicationIds = selectedObjectIds
+							? Object.values(selectedObjectIds)
+							: null;
+
+						// Build the issue URL
+						const issueUrl = `${domain}/projects/${projectId}/models/${issue.resourceIdString}#threadId=${issue.id}`;
+
+						// Extract labels as array of strings
+						const labels = issue.labels
+							? issue.labels.map((label: { name: string }) => label.name)
+							: [];
+
+						// Build the output object with fields in specified order
+						const outputItem: any = {
+							id: issue.id,
+							identifier: issue.identifier,
+							title: issue.title,
+							description: issue.rawDescription || null,
+							status: issue.status || null,
+							priority: issue.priority || null,
+							assignee: issue.assignee?.user?.name || null,
+							dueDate: issue.dueDate || null,
+							labels,
+							createdAt: issue.createdAt || null,
+							updatedAt: issue.updatedAt || null,
+							url: issueUrl,
+							objectIds,
+							applicationIds,
+						};
+
+						// Add replies if requested
+						if (getReplies && issue.replies?.items) {
+							outputItem.replies = issue.replies.items.map(
+								(reply: {
+									id: string;
+									issueId: string;
+									rawDescription: string;
+									createdAt: string;
+									author?: { user?: { name: string } };
+								}) => ({
+									id: reply.id,
+									issueId: reply.issueId,
+									description: reply.rawDescription,
+									createdAt: reply.createdAt,
+									author: reply.author?.user?.name || null,
+								}),
+							);
+						}
+
+						returnData.push({
+							json: outputItem,
+							pairedItem: itemIndex,
+						});
+					}
 				} catch (error) {
 					if (this.continueOnFail()) {
 						returnData.push({
