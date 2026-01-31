@@ -746,6 +746,68 @@ export class Speckle implements INodeType {
 			return [returnData];
 		}
 
+		/**
+		 * Maps new ModelIngestion status enum to legacy numeric codes
+		 */
+		function mapIngestionStatusToLegacyCode(status: string): number {
+			switch (status) {
+				case 'queued': return 0;
+				case 'processing': return 1;
+				case 'success': return 2;
+				case 'failed': return 3;
+				case 'cancelled': return 3;
+				default: return 0;
+			}
+		}
+
+		/**
+		 * Extracts version ID from success status
+		 */
+		function extractVersionIdFromIngestionStatus(statusData: any): string | null {
+			if (statusData.__typename === 'ModelIngestionSuccessStatus') {
+				return statusData.versionId || null;
+			}
+			return null;
+		}
+
+		/**
+		 * Extracts error message from failed/cancelled status
+		 */
+		function extractErrorMessageFromIngestionStatus(statusData: any): string {
+			if (statusData.__typename === 'ModelIngestionFailedStatus') {
+				return statusData.errorReason || 'Unknown error';
+			}
+			if (statusData.__typename === 'ModelIngestionCancelledStatus') {
+				return `Job cancelled: ${statusData.cancellationMessage || 'No reason provided'}`;
+			}
+			return 'Unknown error';
+		}
+
+		/**
+		 * Extracts progress information from status
+		 */
+		function extractProgressFromIngestionStatus(statusData: any): {
+			message?: string;
+			progress?: number;
+		} {
+			const result: { message?: string; progress?: number } = {};
+
+			if (statusData.__typename === 'ModelIngestionQueuedStatus' ||
+					statusData.__typename === 'ModelIngestionProcessingStatus') {
+				if (statusData.progressMessage) {
+					result.message = statusData.progressMessage;
+				}
+			}
+
+			if (statusData.__typename === 'ModelIngestionProcessingStatus' &&
+					statusData.progress !== undefined &&
+					statusData.progress !== null) {
+				result.progress = statusData.progress;
+			}
+
+			return result;
+		}
+
 		// Handle Upload File operation
 		if (resource === 'model' && operation === 'uploadFile') {
 			for (let itemIndex = 0; itemIndex < items.length; itemIndex++) {
@@ -1029,14 +1091,40 @@ export class Speckle implements INodeType {
 						);
 					}
 
-					// Step 7: Start file import
-					const startImportMutation = {
+					// Step 7: Start file ingestion (MODERN API)
+					const startIngestionMutation = {
 						query: `
-							mutation StartFileImport($input: StartFileImportInput!) {
+							mutation StartFileIngestion($input: StartFileImportInput!) {
 								fileUploadMutations {
-									startFileImport(input: $input) {
+									startFileIngestion(input: $input) {
 										id
-										convertedStatus
+										projectId
+										modelId
+										statusData {
+											__typename
+											... on ModelIngestionQueuedStatus {
+												status
+												progressMessage
+											}
+											... on ModelIngestionProcessingStatus {
+												status
+												progressMessage
+												progress
+											}
+											... on ModelIngestionSuccessStatus {
+												status
+												versionId
+											}
+											... on ModelIngestionFailedStatus {
+												status
+												errorReason
+												errorStacktrace
+											}
+											... on ModelIngestionCancelledStatus {
+												status
+												cancellationMessage
+											}
+										}
 									}
 								}
 							}
@@ -1046,65 +1134,93 @@ export class Speckle implements INodeType {
 								projectId,
 								modelId,
 								fileId,
-								etag: etag, // ETag already comes with quotes from S3
+								etag: etag,
 							},
 						},
 					};
 
-					const startImportOptions: IHttpRequestOptions = {
+					const startIngestionOptions: IHttpRequestOptions = {
 						method: 'POST',
 						url: graphqlUrl,
 						headers: {
 							'Content-Type': 'application/json',
 							Authorization: token,
 						},
-						body: startImportMutation,
+						body: startIngestionMutation,
 						json: true,
 					};
 
-					let startImportResponse;
+					let startIngestionResponse;
 					try {
-						startImportResponse = await this.helpers.httpRequest(startImportOptions);
+						startIngestionResponse = await this.helpers.httpRequest(startIngestionOptions);
 					} catch (error) {
 						throw new NodeOperationError(
 							this.getNode(),
-							`Failed to start file import: ${error.message}`,
+							`Failed to start file ingestion: ${error.message}`,
 							{ itemIndex },
 						);
 					}
 
-					if (startImportResponse.errors && startImportResponse.errors.length > 0) {
-						const errorMessages = startImportResponse.errors
+					if (startIngestionResponse.errors && startIngestionResponse.errors.length > 0) {
+						const errorMessages = startIngestionResponse.errors
 							.map((e: { message: string }) => e.message)
 							.join('; ');
 						throw new NodeOperationError(
 							this.getNode(),
-							`GraphQL error while starting import: ${errorMessages}`,
+							`GraphQL error while starting ingestion: ${errorMessages}`,
 							{ itemIndex },
 						);
 					}
 
-					const startImportData = startImportResponse.data?.fileUploadMutations?.startFileImport;
-					const importId = startImportData?.id;
-					const initialConvertedStatus = startImportData?.convertedStatus;
-					if (!importId) {
+					const startIngestionData = startIngestionResponse.data?.fileUploadMutations?.startFileIngestion;
+					const ingestionId = startIngestionData?.id;
+					const initialStatusData = startIngestionData?.statusData;
+
+					if (!ingestionId) {
 						throw new NodeOperationError(
 							this.getNode(),
-							'Failed to start file import: No import ID returned',
+							'Failed to start file ingestion: No ingestion ID returned',
 							{ itemIndex },
 						);
 					}
 
-					// Step 8: Poll for import status until complete
+					// Extract initial status for backward compatibility
+					const initialStatus = initialStatusData?.status || 'queued';
+					const initialConvertedStatus = mapIngestionStatusToLegacyCode(initialStatus);
+
+					// Step 8: Poll for ingestion status until complete
 					const checkStatusQuery = {
 						query: `
-							query CheckImportStatus($projectId: String!, $modelId: String!) {
+							query CheckIngestionStatus($projectId: String!, $ingestionId: String!) {
 								project(id: $projectId) {
-									model(id: $modelId) {
-										pendingImportedVersions {
-											id
-											convertedStatus
-											convertedMessage
+									ingestion(id: $ingestionId) {
+										id
+										projectId
+										modelId
+										statusData {
+											__typename
+											... on ModelIngestionQueuedStatus {
+												status
+												progressMessage
+											}
+											... on ModelIngestionProcessingStatus {
+												status
+												progressMessage
+												progress
+											}
+											... on ModelIngestionSuccessStatus {
+												status
+												versionId
+											}
+											... on ModelIngestionFailedStatus {
+												status
+												errorReason
+												errorStacktrace
+											}
+											... on ModelIngestionCancelledStatus {
+												status
+												cancellationMessage
+											}
 										}
 									}
 								}
@@ -1112,7 +1228,7 @@ export class Speckle implements INodeType {
 						`,
 						variables: {
 							projectId,
-							modelId,
+							ingestionId,
 						},
 					};
 
@@ -1135,6 +1251,7 @@ export class Speckle implements INodeType {
 					let importSuccess = false;
 					let importError = '';
 					let lastPollData: object | null = null;
+					let versionId: string | null = null; // Store version ID from success status
 
 					while (pollAttempt < MAX_POLL_ATTEMPTS && !importComplete) {
 						pollAttempt++;
@@ -1153,50 +1270,56 @@ export class Speckle implements INodeType {
 							continue;
 						}
 
-						const pendingVersions =
-							statusResponse.data?.project?.model?.pendingImportedVersions || [];
-						const importStatus = pendingVersions.find(
-							(v: { id: string }) => v.id === importId,
-						);
+						const ingestionData = statusResponse.data?.project?.ingestion;
+
+						// Handle case where ingestion is null (completed and cleaned up)
+						if (!ingestionData) {
+							if (pollAttempt >= 5) {
+								importComplete = true;
+								importSuccess = true;
+								lastPollData = {
+									pollAttempt,
+									ingestionStatus: 'null - possibly completed and cleaned up',
+								};
+							}
+							continue;
+						}
+
+						const statusData = ingestionData.statusData;
+						const status = statusData?.status || 'queued';
+						const progressInfo = extractProgressFromIngestionStatus(statusData);
 
 						lastPollData = {
 							pollAttempt,
-							pendingVersions: pendingVersions.map((v: { id: string; convertedStatus: number; convertedMessage: string }) => ({
-								id: v.id,
-								status: v.convertedStatus,
-								message: v.convertedMessage,
-							})),
+							ingestionId: ingestionData.id,
+							status: status,
+							statusType: statusData.__typename,
+							progressMessage: progressInfo.message,
+							progress: progressInfo.progress,
 						};
 
-						if (importStatus) {
-							const status = importStatus.convertedStatus;
-							// Status codes: 0=queued, 1=processing, 2=success, 3=error
-							if (status === 2) {
-								importComplete = true;
-								importSuccess = true;
-							} else if (status === 3) {
-								importComplete = true;
-								importSuccess = false;
-								importError = importStatus.convertedMessage || 'Unknown error';
-							}
-							// 0 or 1 means still processing, continue polling
-						} else {
-							// Import not in pending list - might be complete or not started yet
-							// If we've polled a few times and it's not there, consider it done
-							if (pollAttempt >= 5) {
-								importComplete = true;
-								importSuccess = true; // Assume success if not in pending list
-							}
+						// Check if ingestion is complete
+						if (status === 'success') {
+							importComplete = true;
+							importSuccess = true;
+							versionId = extractVersionIdFromIngestionStatus(statusData);
+						} else if (status === 'failed' || status === 'cancelled') {
+							importComplete = true;
+							importSuccess = false;
+							importError = extractErrorMessageFromIngestionStatus(statusData);
 						}
+						// 'queued' or 'processing' means continue polling
 					}
 
 					// Step 9: Return result
 					const debug = {
+						api: 'ModelIngestion', // Indicate which API is being used
 						s3StatusCode,
 						etag,
 						fileSize: fileBuffer.length,
 						fileName,
-						initialConvertedStatus,
+						initialStatus: initialStatus, // String status
+						initialConvertedStatus, // Numeric for backward compatibility
 						pollAttempts: pollAttempt,
 						lastPollData,
 					};
@@ -1211,7 +1334,8 @@ export class Speckle implements INodeType {
 								modelCreated,
 								fileId,
 								fileName,
-								importId,
+								importId: ingestionId, // Now using ingestionId
+								versionId, // NEW: Version ID from success status
 								status: 'success',
 								message: 'File imported successfully',
 								debug,
@@ -1226,7 +1350,7 @@ export class Speckle implements INodeType {
 								modelId,
 								modelName,
 								fileId,
-								importId,
+								importId: ingestionId, // Updated
 								status: 'error',
 								error: `Import failed: ${importError}`,
 								debug,
@@ -1242,7 +1366,7 @@ export class Speckle implements INodeType {
 								modelId,
 								modelName,
 								fileId,
-								importId,
+								importId: ingestionId, // Updated
 								status: 'timeout',
 								error: 'Import is still processing. Check Speckle for status.',
 								debug,
