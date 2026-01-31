@@ -27,8 +27,6 @@ services:
       - n8n_data:/home/node/.n8n
       - ./dist:/home/node/.n8n/custom
       - ./node_modules:/home/node/.n8n/custom/node_modules:ro
-      - n8n_binary_data:/home/node/.n8n/binary-data
 
 volumes:
   n8n_data:
-  n8n_binary_data:

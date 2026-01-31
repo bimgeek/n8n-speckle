@@ -10,6 +10,7 @@ import { ObjectLoader2Factory } from '@speckle/objectloader2';
 import { httpVerbFields, httpVerbOperations } from './HttpVerbDescription';
 import { issuesFields, issuesOperations } from './IssuesDescription';
 import { modelFields, modelOperations } from './LoadModelDescription';
+import { uploadFileFields } from './UploadFileDescription';
 
 export class Speckle implements INodeType {
 	description: INodeTypeDescription = {
@@ -76,6 +77,7 @@ export class Speckle implements INodeType {
 
 			...modelOperations,
 			...modelFields,
+			...uploadFileFields,
 			...issuesOperations,
 			...issuesFields,
 			...httpVerbOperations,
@@ -733,6 +735,528 @@ export class Speckle implements INodeType {
 					if (this.continueOnFail()) {
 						returnData.push({
 							json: { error: error.message },
+							pairedItem: itemIndex,
+						});
+					} else {
+						throw error;
+					}
+				}
+			}
+
+			return [returnData];
+		}
+
+		// Handle Upload File operation
+		if (resource === 'model' && operation === 'uploadFile') {
+			for (let itemIndex = 0; itemIndex < items.length; itemIndex++) {
+				try {
+					// Get parameters
+					const projectInput = this.getNodeParameter('projectInput', itemIndex) as string;
+					const modelName = this.getNodeParameter('modelName', itemIndex) as string;
+					const overrideExisting = this.getNodeParameter('overrideExisting', itemIndex) as boolean;
+					const binaryPropertyName = this.getNodeParameter('binaryPropertyName', itemIndex) as string;
+
+					// Step 1: Parse projectInput to extract projectId
+					const urlMatch = projectInput.match(/^https?:\/\/[^\/]+\/projects\/([^\/]+)/);
+					const projectId = urlMatch ? urlMatch[1] : projectInput;
+
+					// Get credentials
+					const credentials = await this.getCredentials('speckleApi');
+					const token = credentials.token as string;
+					let domain = credentials.domain as string;
+
+					// Remove trailing slash from domain if present
+					domain = domain.replace(/\/$/, '');
+
+					const graphqlUrl = `${domain}/graphql`;
+
+					// Step 2: Get binary file data
+					const binaryData = items[itemIndex].binary;
+					if (!binaryData || !binaryData[binaryPropertyName]) {
+						throw new NodeOperationError(
+							this.getNode(),
+							`No binary data found in property "${binaryPropertyName}". Make sure the input contains a file.`,
+							{ itemIndex },
+						);
+					}
+
+					const fileBuffer = await this.helpers.getBinaryDataBuffer(itemIndex, binaryPropertyName);
+					const fileName = binaryData[binaryPropertyName].fileName || 'upload.ifc';
+
+					// Step 3: Query project.models to find model by name
+					const findModelQuery = {
+						query: `
+							query FindModelByName($projectId: String!, $filter: ProjectModelsFilter) {
+								project(id: $projectId) {
+									models(filter: $filter) {
+										items {
+											id
+											name
+										}
+									}
+								}
+							}
+						`,
+						variables: {
+							projectId,
+							filter: { search: modelName },
+						},
+					};
+
+					const findModelOptions: IHttpRequestOptions = {
+						method: 'POST',
+						url: graphqlUrl,
+						headers: {
+							'Content-Type': 'application/json',
+							Authorization: token,
+						},
+						body: findModelQuery,
+						json: true,
+					};
+
+					let findModelResponse;
+					try {
+						findModelResponse = await this.helpers.httpRequest(findModelOptions);
+					} catch (error) {
+						throw new NodeOperationError(
+							this.getNode(),
+							`Failed to query models: ${error.message}`,
+							{ itemIndex },
+						);
+					}
+
+					if (findModelResponse.errors && findModelResponse.errors.length > 0) {
+						const errorMessages = findModelResponse.errors
+							.map((e: { message: string }) => e.message)
+							.join('; ');
+						throw new NodeOperationError(
+							this.getNode(),
+							`GraphQL error while querying models: ${errorMessages}`,
+							{ itemIndex },
+						);
+					}
+
+					// Find exact match for model name
+					const models = findModelResponse.data?.project?.models?.items || [];
+					const existingModel = models.find((m: { id: string; name: string }) => m.name === modelName);
+
+					// Step 4: Handle model existence
+					let modelId: string;
+					let modelCreated = false;
+
+					if (existingModel) {
+						if (overrideExisting) {
+							// Use existing model
+							modelId = existingModel.id;
+						} else {
+							// Throw error - model exists and override is false
+							throw new NodeOperationError(
+								this.getNode(),
+								`Model '${modelName}' already exists. Set 'Override If Exists' to true to upload a new version.`,
+								{ itemIndex },
+							);
+						}
+					} else {
+						// Create new model
+						const createModelMutation = {
+							query: `
+								mutation CreateModel($input: CreateModelInput!) {
+									modelMutations {
+										create(input: $input) {
+											id
+										}
+									}
+								}
+							`,
+							variables: {
+								input: {
+									projectId,
+									name: modelName,
+								},
+							},
+						};
+
+						const createModelOptions: IHttpRequestOptions = {
+							method: 'POST',
+							url: graphqlUrl,
+							headers: {
+								'Content-Type': 'application/json',
+								Authorization: token,
+							},
+							body: createModelMutation,
+							json: true,
+						};
+
+						let createModelResponse;
+						try {
+							createModelResponse = await this.helpers.httpRequest(createModelOptions);
+						} catch (error) {
+							throw new NodeOperationError(
+								this.getNode(),
+								`Failed to create model: ${error.message}`,
+								{ itemIndex },
+							);
+						}
+
+						if (createModelResponse.errors && createModelResponse.errors.length > 0) {
+							const errorMessages = createModelResponse.errors
+								.map((e: { message: string }) => e.message)
+								.join('; ');
+							throw new NodeOperationError(
+								this.getNode(),
+								`GraphQL error while creating model: ${errorMessages}`,
+								{ itemIndex },
+							);
+						}
+
+						modelId = createModelResponse.data?.modelMutations?.create?.id;
+						if (!modelId) {
+							throw new NodeOperationError(
+								this.getNode(),
+								'Failed to create model: No model ID returned',
+								{ itemIndex },
+							);
+						}
+						modelCreated = true;
+					}
+
+					// Step 5: Generate presigned upload URL
+					const generateUrlMutation = {
+						query: `
+							mutation GenerateFileUploadUrl($input: GenerateFileUploadUrlInput!) {
+								fileUploadMutations {
+									generateUploadUrl(input: $input) {
+										url
+										fileId
+									}
+								}
+							}
+						`,
+						variables: {
+							input: {
+								projectId,
+								fileName,
+							},
+						},
+					};
+
+					const generateUrlOptions: IHttpRequestOptions = {
+						method: 'POST',
+						url: graphqlUrl,
+						headers: {
+							'Content-Type': 'application/json',
+							Authorization: token,
+						},
+						body: generateUrlMutation,
+						json: true,
+					};
+
+					let generateUrlResponse;
+					try {
+						generateUrlResponse = await this.helpers.httpRequest(generateUrlOptions);
+					} catch (error) {
+						throw new NodeOperationError(
+							this.getNode(),
+							`Failed to generate upload URL: ${error.message}`,
+							{ itemIndex },
+						);
+					}
+
+					if (generateUrlResponse.errors && generateUrlResponse.errors.length > 0) {
+						const errorMessages = generateUrlResponse.errors
+							.map((e: { message: string }) => e.message)
+							.join('; ');
+						throw new NodeOperationError(
+							this.getNode(),
+							`GraphQL error while generating upload URL: ${errorMessages}`,
+							{ itemIndex },
+						);
+					}
+
+					const presignedUrl = generateUrlResponse.data?.fileUploadMutations?.generateUploadUrl?.url;
+					const fileId = generateUrlResponse.data?.fileUploadMutations?.generateUploadUrl?.fileId;
+
+					if (!presignedUrl || !fileId) {
+						throw new NodeOperationError(
+							this.getNode(),
+							'Failed to generate upload URL: No URL or fileId returned',
+							{ itemIndex },
+						);
+					}
+
+					// Step 6: Upload file to S3 presigned URL
+					const uploadOptions: IHttpRequestOptions = {
+						method: 'PUT',
+						url: presignedUrl,
+						headers: {
+							'Content-Type': 'application/octet-stream',
+							'Content-Length': fileBuffer.length.toString(),
+						},
+						body: fileBuffer,
+						returnFullResponse: true,
+						encoding: 'arraybuffer',
+						json: false,
+					};
+
+					let uploadResponse;
+					try {
+						uploadResponse = await this.helpers.httpRequest(uploadOptions);
+					} catch (error) {
+						throw new NodeOperationError(
+							this.getNode(),
+							`Failed to upload file to S3: ${error.message}`,
+							{ itemIndex },
+						);
+					}
+
+					// Validate S3 upload succeeded
+					const s3StatusCode = uploadResponse.statusCode;
+					if (s3StatusCode < 200 || s3StatusCode >= 300) {
+						throw new NodeOperationError(
+							this.getNode(),
+							`S3 upload failed with status ${s3StatusCode}`,
+							{ itemIndex },
+						);
+					}
+
+					// Extract ETag from response headers
+					const etag = uploadResponse.headers?.etag || uploadResponse.headers?.ETag;
+					if (!etag) {
+						throw new NodeOperationError(
+							this.getNode(),
+							'Failed to get ETag from S3 upload response',
+							{ itemIndex },
+						);
+					}
+
+					// Step 7: Start file import
+					const startImportMutation = {
+						query: `
+							mutation StartFileImport($input: StartFileImportInput!) {
+								fileUploadMutations {
+									startFileImport(input: $input) {
+										id
+										convertedStatus
+									}
+								}
+							}
+						`,
+						variables: {
+							input: {
+								projectId,
+								modelId,
+								fileId,
+								etag: etag, // ETag already comes with quotes from S3
+							},
+						},
+					};
+
+					const startImportOptions: IHttpRequestOptions = {
+						method: 'POST',
+						url: graphqlUrl,
+						headers: {
+							'Content-Type': 'application/json',
+							Authorization: token,
+						},
+						body: startImportMutation,
+						json: true,
+					};
+
+					let startImportResponse;
+					try {
+						startImportResponse = await this.helpers.httpRequest(startImportOptions);
+					} catch (error) {
+						throw new NodeOperationError(
+							this.getNode(),
+							`Failed to start file import: ${error.message}`,
+							{ itemIndex },
+						);
+					}
+
+					if (startImportResponse.errors && startImportResponse.errors.length > 0) {
+						const errorMessages = startImportResponse.errors
+							.map((e: { message: string }) => e.message)
+							.join('; ');
+						throw new NodeOperationError(
+							this.getNode(),
+							`GraphQL error while starting import: ${errorMessages}`,
+							{ itemIndex },
+						);
+					}
+
+					const startImportData = startImportResponse.data?.fileUploadMutations?.startFileImport;
+					const importId = startImportData?.id;
+					const initialConvertedStatus = startImportData?.convertedStatus;
+					if (!importId) {
+						throw new NodeOperationError(
+							this.getNode(),
+							'Failed to start file import: No import ID returned',
+							{ itemIndex },
+						);
+					}
+
+					// Step 8: Poll for import status until complete
+					const checkStatusQuery = {
+						query: `
+							query CheckImportStatus($projectId: String!, $modelId: String!) {
+								project(id: $projectId) {
+									model(id: $modelId) {
+										pendingImportedVersions {
+											id
+											convertedStatus
+											convertedMessage
+										}
+									}
+								}
+							}
+						`,
+						variables: {
+							projectId,
+							modelId,
+						},
+					};
+
+					const checkStatusOptions: IHttpRequestOptions = {
+						method: 'POST',
+						url: graphqlUrl,
+						headers: {
+							'Content-Type': 'application/json',
+							Authorization: token,
+						},
+						body: checkStatusQuery,
+						json: true,
+					};
+
+					// Poll every 3 seconds, max 60 attempts (~3 minutes)
+					const MAX_POLL_ATTEMPTS = 60;
+					const POLL_INTERVAL_MS = 3000;
+					let pollAttempt = 0;
+					let importComplete = false;
+					let importSuccess = false;
+					let importError = '';
+					let lastPollData: object | null = null;
+
+					while (pollAttempt < MAX_POLL_ATTEMPTS && !importComplete) {
+						pollAttempt++;
+
+						// Wait before polling (except first attempt)
+						if (pollAttempt > 1) {
+							await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+						}
+
+						let statusResponse;
+						try {
+							statusResponse = await this.helpers.httpRequest(checkStatusOptions);
+						} catch (error) {
+							// Continue polling on network errors
+							this.logger.warn(`Poll attempt ${pollAttempt} failed: ${error.message}`);
+							continue;
+						}
+
+						const pendingVersions =
+							statusResponse.data?.project?.model?.pendingImportedVersions || [];
+						const importStatus = pendingVersions.find(
+							(v: { id: string }) => v.id === importId,
+						);
+
+						lastPollData = {
+							pollAttempt,
+							pendingVersions: pendingVersions.map((v: { id: string; convertedStatus: number; convertedMessage: string }) => ({
+								id: v.id,
+								status: v.convertedStatus,
+								message: v.convertedMessage,
+							})),
+						};
+
+						if (importStatus) {
+							const status = importStatus.convertedStatus;
+							// Status codes: 0=queued, 1=processing, 2=success, 3=error
+							if (status === 2) {
+								importComplete = true;
+								importSuccess = true;
+							} else if (status === 3) {
+								importComplete = true;
+								importSuccess = false;
+								importError = importStatus.convertedMessage || 'Unknown error';
+							}
+							// 0 or 1 means still processing, continue polling
+						} else {
+							// Import not in pending list - might be complete or not started yet
+							// If we've polled a few times and it's not there, consider it done
+							if (pollAttempt >= 5) {
+								importComplete = true;
+								importSuccess = true; // Assume success if not in pending list
+							}
+						}
+					}
+
+					// Step 9: Return result
+					const debug = {
+						s3StatusCode,
+						etag,
+						fileSize: fileBuffer.length,
+						fileName,
+						initialConvertedStatus,
+						pollAttempts: pollAttempt,
+						lastPollData,
+					};
+
+					if (importSuccess) {
+						returnData.push({
+							json: {
+								success: true,
+								projectId,
+								modelId,
+								modelName,
+								modelCreated,
+								fileId,
+								fileName,
+								importId,
+								status: 'success',
+								message: 'File imported successfully',
+								debug,
+							},
+							pairedItem: itemIndex,
+						});
+					} else if (importComplete && !importSuccess) {
+						returnData.push({
+							json: {
+								success: false,
+								projectId,
+								modelId,
+								modelName,
+								fileId,
+								importId,
+								status: 'error',
+								error: `Import failed: ${importError}`,
+								debug,
+							},
+							pairedItem: itemIndex,
+						});
+					} else {
+						// Timeout - import still processing
+						returnData.push({
+							json: {
+								success: false,
+								projectId,
+								modelId,
+								modelName,
+								fileId,
+								importId,
+								status: 'timeout',
+								error: 'Import is still processing. Check Speckle for status.',
+								debug,
+							},
+							pairedItem: itemIndex,
+						});
+					}
+				} catch (error) {
+					if (this.continueOnFail()) {
+						returnData.push({
+							json: {
+								success: false,
+								error: error.message,
+							},
 							pairedItem: itemIndex,
 						});
 					} else {

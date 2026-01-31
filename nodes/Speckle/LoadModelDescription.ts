@@ -32,6 +32,12 @@ export const modelOperations: INodeProperties[] = [
 				description: 'Flatten nested properties into a single-level object',
 				action: 'Query properties',
 			},
+			{
+				name: 'Upload File',
+				value: 'uploadFile',
+				description: 'Upload IFC, DWG, OBJ, or other files to create a model version',
+				action: 'Upload file',
+			},
 		],
 		default: 'loadModel',
 	},
