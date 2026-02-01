@@ -8,6 +8,17 @@ import type {
 import { NodeOperationError } from 'n8n-workflow';
 import { ObjectLoader2Factory } from '@speckle/objectloader2';
 import { executeGraphQLQuery, QUERIES } from './utils/graphql';
+import {
+	parseSpeckleModelUrl,
+	parseSpeckleIssuesUrl,
+	extractProjectId,
+} from './utils/urlParsing';
+import {
+	mapIngestionStatusToLegacyCode,
+	extractVersionIdFromIngestionStatus,
+	extractErrorMessageFromIngestionStatus,
+	extractProgressFromIngestionStatus,
+} from './utils/ingestionStatus';
 import { httpVerbFields, httpVerbOperations } from './HttpVerbDescription';
 import { issuesFields, issuesOperations } from './IssuesDescription';
 import { modelFields, modelOperations } from './LoadModelDescription';
@@ -485,20 +496,17 @@ export class Speckle implements INodeType {
 				try {
 					const modelUrl = this.getNodeParameter('modelUrl', itemIndex) as string;
 
-					// Parse the URL to extract components
-					const urlMatch = modelUrl.match(
-						/^(https?:\/\/[^\/]+)\/projects\/([^\/]+)\/models\/([^\/,@]+)$/,
-					);
-
-					if (!urlMatch) {
-						throw new NodeOperationError(
-							this.getNode(),
-							'Invalid Speckle model URL. Expected format: https://app.speckle.systems/projects/{projectId}/models/{modelId}',
-							{ itemIndex },
-						);
+					let baseUrl: string;
+					let projectId: string;
+					let modelId: string;
+					try {
+						const parsed = parseSpeckleModelUrl(modelUrl);
+						baseUrl = parsed.baseUrl;
+						projectId = parsed.projectId;
+						modelId = parsed.modelId!;
+					} catch (error) {
+						throw new NodeOperationError(this.getNode(), error.message, { itemIndex });
 					}
-
-					const [, baseUrl, projectId, modelId] = urlMatch;
 
 					// Get credentials
 					const credentials = await this.getCredentials('speckleApi');
@@ -709,68 +717,6 @@ export class Speckle implements INodeType {
 			return [returnData];
 		}
 
-		/**
-		 * Maps new ModelIngestion status enum to legacy numeric codes
-		 */
-		const mapIngestionStatusToLegacyCode = (status: string): number => {
-			switch (status) {
-				case 'queued': return 0;
-				case 'processing': return 1;
-				case 'success': return 2;
-				case 'failed': return 3;
-				case 'cancelled': return 3;
-				default: return 0;
-			}
-		};
-
-		/**
-		 * Extracts version ID from success status
-		 */
-		const extractVersionIdFromIngestionStatus = (statusData: any): string | null => {
-			if (statusData.__typename === 'ModelIngestionSuccessStatus') {
-				return statusData.versionId || null;
-			}
-			return null;
-		};
-
-		/**
-		 * Extracts error message from failed/cancelled status
-		 */
-		const extractErrorMessageFromIngestionStatus = (statusData: any): string => {
-			if (statusData.__typename === 'ModelIngestionFailedStatus') {
-				return statusData.errorReason || 'Unknown error';
-			}
-			if (statusData.__typename === 'ModelIngestionCancelledStatus') {
-				return `Job cancelled: ${statusData.cancellationMessage || 'No reason provided'}`;
-			}
-			return 'Unknown error';
-		};
-
-		/**
-		 * Extracts progress information from status
-		 */
-		const extractProgressFromIngestionStatus = (statusData: any): {
-			message?: string;
-			progress?: number;
-		} => {
-			const result: { message?: string; progress?: number } = {};
-
-			if (statusData.__typename === 'ModelIngestionQueuedStatus' ||
-					statusData.__typename === 'ModelIngestionProcessingStatus') {
-				if (statusData.progressMessage) {
-					result.message = statusData.progressMessage;
-				}
-			}
-
-			if (statusData.__typename === 'ModelIngestionProcessingStatus' &&
-					statusData.progress !== undefined &&
-					statusData.progress !== null) {
-				result.progress = statusData.progress;
-			}
-
-			return result;
-		};
-
 		// Handle Upload File operation
 		if (resource === 'model' && operation === 'uploadFile') {
 			for (let itemIndex = 0; itemIndex < items.length; itemIndex++) {
@@ -782,8 +728,7 @@ export class Speckle implements INodeType {
 					const binaryPropertyName = this.getNodeParameter('binaryPropertyName', itemIndex) as string;
 
 					// Step 1: Parse projectInput to extract projectId
-					const urlMatch = projectInput.match(/^https?:\/\/[^\/]+\/projects\/([^\/]+)/);
-					const projectId = urlMatch ? urlMatch[1] : projectInput;
+					const projectId = extractProjectId(projectInput);
 
 					// Get credentials
 					const credentials = await this.getCredentials('speckleApi');
@@ -1117,23 +1062,19 @@ export class Speckle implements INodeType {
 					const issuesUrl = this.getNodeParameter('issuesUrl', itemIndex) as string;
 					const getReplies = this.getNodeParameter('getReplies', itemIndex) as boolean;
 
-					// Parse the URL to extract components - supports project, model, and version URLs
-					// Project URL: https://app.speckle.systems/projects/{projectId}
-					// Model URL: https://app.speckle.systems/projects/{projectId}/models/{modelId}
-					// Version URL: https://app.speckle.systems/projects/{projectId}/models/{modelId}@{versionId}
-					const urlMatch = issuesUrl.match(
-						/^(https?:\/\/[^\/]+)\/projects\/([^\/]+)(?:\/models\/([^@\/]+))?(?:@([^\/]+))?$/,
-					);
-
-					if (!urlMatch) {
-						throw new NodeOperationError(
-							this.getNode(),
-							'Invalid Speckle URL. Expected format: https://server/projects/{projectId}[/models/{modelId}[@{versionId}]]',
-							{ itemIndex },
-						);
+					let baseUrl: string;
+					let projectId: string;
+					let modelId: string | undefined;
+					let versionId: string | undefined;
+					try {
+						const parsed = parseSpeckleIssuesUrl(issuesUrl);
+						baseUrl = parsed.baseUrl;
+						projectId = parsed.projectId;
+						modelId = parsed.modelId;
+						versionId = parsed.versionId;
+					} catch (error) {
+						throw new NodeOperationError(this.getNode(), error.message, { itemIndex });
 					}
-
-					const [, baseUrl, projectId, modelId, versionId] = urlMatch;
 
 					// Get credentials
 					const credentials = await this.getCredentials('speckleApi');
