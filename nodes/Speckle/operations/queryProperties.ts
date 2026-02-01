@@ -27,7 +27,7 @@ export async function handleQueryProperties(
 			}
 
 			// Flatten the properties using the algorithm
-			const flattenedProperties = flattenRecord(inputData, null, null, null);
+			const flattenedProperties = flattenRecord(inputData, null, null);
 
 			// Return flattened object as a new item
 			returnData.push({

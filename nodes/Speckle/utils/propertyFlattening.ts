@@ -86,7 +86,6 @@ const processField = (
 	fieldName: string,
 	fieldValue: any,
 	currentParentPath: string,
-	filterKeys: string[] | null,
 	state: { FlattenedRecord: any; ExistingFieldsSet: Set<string>; ExistingFieldsList: string[] },
 ): { FlattenedRecord: any; ExistingFieldsSet: Set<string>; ExistingFieldsList: string[] } => {
 	// Build the new path for this field
@@ -101,22 +100,22 @@ const processField = (
 
 	// Case A: Field is a name/value record
 	if (isRecord(fieldValue) && 'name' in fieldValue && 'value' in fieldValue) {
-		return processNameValueRecord(fieldValue, currentParentPath, filterKeys, state);
+		return processNameValueRecord(fieldValue, currentParentPath, state);
 	}
 
 	// Case B: Field value is null
 	else if (fieldValue === null) {
-		return processNullValue(fieldName, currentParentPath, filterKeys, state);
+		return processNullValue(fieldName, currentParentPath, state);
 	}
 
 	// Case C: Field value is a nested record
 	else if (isRecord(fieldValue)) {
-		return processNestedRecord(fieldValue, newPath, filterKeys, state);
+		return processNestedRecord(fieldValue, newPath, state);
 	}
 
 	// Case D: Field value is a primitive (string, number, boolean) or array
 	else {
-		return processPrimitiveValue(fieldName, fieldValue, currentParentPath, filterKeys, state);
+		return processPrimitiveValue(fieldName, fieldValue, currentParentPath, state);
 	}
 };
 
@@ -126,7 +125,6 @@ const processField = (
 const processNameValueRecord = (
 	fieldValue: any,
 	currentParentPath: string,
-	filterKeys: string[] | null,
 	state: { FlattenedRecord: any; ExistingFieldsSet: Set<string>; ExistingFieldsList: string[] },
 ): { FlattenedRecord: any; ExistingFieldsSet: Set<string>; ExistingFieldsList: string[] } => {
 	const nameField = fieldValue.name;
@@ -164,7 +162,6 @@ const processNameValueRecord = (
 const processNullValue = (
 	fieldName: string,
 	currentParentPath: string,
-	filterKeys: string[] | null,
 	state: { FlattenedRecord: any; ExistingFieldsSet: Set<string>; ExistingFieldsList: string[] },
 ): { FlattenedRecord: any; ExistingFieldsSet: Set<string>; ExistingFieldsList: string[] } => {
 	// Resolve naming conflicts (uses Set for O(1) lookup)
@@ -194,7 +191,6 @@ const processNullValue = (
 const processNestedRecord = (
 	fieldValue: any,
 	newPath: string,
-	filterKeys: string[] | null,
 	state: { FlattenedRecord: any; ExistingFieldsSet: Set<string>; ExistingFieldsList: string[] },
 ): { FlattenedRecord: any; ExistingFieldsSet: Set<string>; ExistingFieldsList: string[] } => {
 	// Skip empty records
@@ -204,7 +200,7 @@ const processNestedRecord = (
 	}
 
 	// Recursively flatten the nested record
-	const flattened = flattenRecordImpl(fieldValue, filterKeys, newPath, state.ExistingFieldsList);
+	const flattened = flattenRecordImpl(fieldValue, newPath, state.ExistingFieldsList);
 
 	// Get all field names from the flattened result
 	const flattenedFieldNames = Object.keys(flattened);
@@ -233,7 +229,6 @@ const processPrimitiveValue = (
 	fieldName: string,
 	fieldValue: any,
 	currentParentPath: string,
-	filterKeys: string[] | null,
 	state: { FlattenedRecord: any; ExistingFieldsSet: Set<string>; ExistingFieldsList: string[] },
 ): { FlattenedRecord: any; ExistingFieldsSet: Set<string>; ExistingFieldsList: string[] } => {
 	// Resolve naming conflicts (uses Set for O(1) lookup)
@@ -263,7 +258,6 @@ const processPrimitiveValue = (
  */
 const flattenRecordImpl = (
 	inputRecord: any,
-	filterKeys: string[] | null,
 	parentPath: string | null,
 	existingFields: string[] | null,
 ): any => {
@@ -306,7 +300,7 @@ const flattenRecordImpl = (
 
 	// Process each field sequentially (accumulation pattern)
 	for (const fieldName of fieldNames) {
-		state = processField(fieldName, recordToProcess[fieldName], currentParentPath, filterKeys, state);
+		state = processField(fieldName, recordToProcess[fieldName], currentParentPath, state);
 	}
 
 	// Return the flattened record
@@ -319,9 +313,8 @@ const flattenRecordImpl = (
  */
 export const flattenRecord = (
 	inputRecord: any,
-	filterKeys: string[] | null = null,
 	parentPath: string | null = null,
 	existingFields: string[] | null = null,
 ): any => {
-	return flattenRecordImpl(inputRecord, filterKeys, parentPath, existingFields);
+	return flattenRecordImpl(inputRecord, parentPath, existingFields);
 };
