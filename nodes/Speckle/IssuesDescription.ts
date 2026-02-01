@@ -33,8 +33,7 @@ const getIssuesOperation: INodeProperties[] = [
 		type: 'string',
 		default: '',
 		placeholder: 'https://app.speckle.systems/projects/{projectId}/models/{modelId}',
-		description:
-			'The Speckle URL (project, model, or version). Supports formats: /projects/{id}, /projects/{id}/models/{modelId}, or /projects/{id}/models/{modelId}@{versionId}',
+		description: 'The Speckle URL (project, model, or version). Supports formats: /projects/{ID}, /projects/{ID}/models/{modelId}, or /projects/{ID}/models/{modelId}@{versionId}.',
 		displayOptions: {
 			show: {
 				resource: ['issues'],

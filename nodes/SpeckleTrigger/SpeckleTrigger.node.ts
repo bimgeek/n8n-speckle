@@ -8,6 +8,7 @@ import type {
 import { NodeOperationError } from 'n8n-workflow';
 import { SubscriptionClient } from 'subscriptions-transport-ws';
 import { WebSocket } from 'ws';
+import { parseSpeckleModelUrl } from '../Speckle/utils/urlParsing';
 
 export class SpeckleTrigger implements INodeType {
 	description: INodeTypeDescription = {
@@ -48,18 +49,18 @@ export class SpeckleTrigger implements INodeType {
 		const modelUrl = this.getNodeParameter('modelUrl') as string;
 
 		// Parse the URL to extract components
-		const urlMatch = modelUrl.match(
-			/^(https?:\/\/[^\/]+)\/projects\/([^\/]+)\/models\/([^\/,@]+)$/,
-		);
-
-		if (!urlMatch) {
+		let projectId: string;
+		let modelId: string;
+		try {
+			const parsed = parseSpeckleModelUrl(modelUrl);
+			projectId = parsed.projectId;
+			modelId = parsed.modelId!;
+		} catch (error) {
 			throw new NodeOperationError(
 				this.getNode(),
-				'Invalid Speckle model URL. Expected format: https://app.speckle.systems/projects/{projectId}/models/{modelId}',
+				(error as Error).message,
 			);
 		}
-
-		const [, , projectId, modelId] = urlMatch;
 
 		// Get credentials
 		const credentials = await this.getCredentials('speckleApi');
