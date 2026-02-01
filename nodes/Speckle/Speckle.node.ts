@@ -65,7 +65,7 @@ export class Speckle implements INodeType {
 						value: 'model',
 					},
 					{
-						name: 'Issues',
+						name: 'Issue',
 						value: 'issues',
 					},
 					{
