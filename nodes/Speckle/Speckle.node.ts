@@ -712,7 +712,7 @@ export class Speckle implements INodeType {
 		/**
 		 * Maps new ModelIngestion status enum to legacy numeric codes
 		 */
-		function mapIngestionStatusToLegacyCode(status: string): number {
+		const mapIngestionStatusToLegacyCode = (status: string): number => {
 			switch (status) {
 				case 'queued': return 0;
 				case 'processing': return 1;
@@ -721,22 +721,22 @@ export class Speckle implements INodeType {
 				case 'cancelled': return 3;
 				default: return 0;
 			}
-		}
+		};
 
 		/**
 		 * Extracts version ID from success status
 		 */
-		function extractVersionIdFromIngestionStatus(statusData: any): string | null {
+		const extractVersionIdFromIngestionStatus = (statusData: any): string | null => {
 			if (statusData.__typename === 'ModelIngestionSuccessStatus') {
 				return statusData.versionId || null;
 			}
 			return null;
-		}
+		};
 
 		/**
 		 * Extracts error message from failed/cancelled status
 		 */
-		function extractErrorMessageFromIngestionStatus(statusData: any): string {
+		const extractErrorMessageFromIngestionStatus = (statusData: any): string => {
 			if (statusData.__typename === 'ModelIngestionFailedStatus') {
 				return statusData.errorReason || 'Unknown error';
 			}
@@ -744,15 +744,15 @@ export class Speckle implements INodeType {
 				return `Job cancelled: ${statusData.cancellationMessage || 'No reason provided'}`;
 			}
 			return 'Unknown error';
-		}
+		};
 
 		/**
 		 * Extracts progress information from status
 		 */
-		function extractProgressFromIngestionStatus(statusData: any): {
+		const extractProgressFromIngestionStatus = (statusData: any): {
 			message?: string;
 			progress?: number;
-		} {
+		} => {
 			const result: { message?: string; progress?: number } = {};
 
 			if (statusData.__typename === 'ModelIngestionQueuedStatus' ||
@@ -769,7 +769,7 @@ export class Speckle implements INodeType {
 			}
 
 			return result;
-		}
+		};
 
 		// Handle Upload File operation
 		if (resource === 'model' && operation === 'uploadFile') {
