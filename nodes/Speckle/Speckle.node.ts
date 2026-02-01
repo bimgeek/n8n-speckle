@@ -5,7 +5,6 @@ import type {
 	INodeTypeDescription,
 } from 'n8n-workflow';
 import { NodeOperationError } from 'n8n-workflow';
-import { httpVerbFields, httpVerbOperations } from './HttpVerbDescription';
 import { issuesFields, issuesOperations } from './IssuesDescription';
 import { modelFields, modelOperations } from './LoadModelDescription';
 import { uploadFileFields } from './UploadFileDescription';
@@ -47,7 +46,7 @@ export class Speckle implements INodeType {
 		 *
 		 * https://docs.n8n.io/integrations/creating-nodes/code/create-first-node/#resources-and-operations
 		 *
-		 * In our example, the operations are separated into their own file (HTTPVerbDescription.ts)
+		 * Operations are separated into their own files (LoadModelDescription.ts, IssuesDescription.ts, etc.)
 		 * to keep this class easy to read.
 		 *
 		 */
@@ -66,10 +65,6 @@ export class Speckle implements INodeType {
 						name: 'Issue',
 						value: 'issues',
 					},
-					{
-						name: 'HTTP Verb',
-						value: 'httpVerb',
-					},
 				],
 				default: 'model',
 			},
@@ -79,8 +74,6 @@ export class Speckle implements INodeType {
 			...uploadFileFields,
 			...issuesOperations,
 			...issuesFields,
-			...httpVerbOperations,
-			...httpVerbFields,
 		],
 	};
 
@@ -114,7 +107,7 @@ export class Speckle implements INodeType {
 			const result = await operations.handleUploadFile(this, items);
 			return [result];
 		}
-		// For other resources (like HTTP Verb), return empty to use declarative routing
+
 		throw new NodeOperationError(
 			this.getNode(),
 			`The operation "${operation}" is not supported for resource "${resource}"`,
