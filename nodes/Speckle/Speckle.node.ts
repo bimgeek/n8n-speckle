@@ -989,14 +989,15 @@ export class Speckle implements INodeType {
 
 						const ingestionData = statusResponse.data?.project?.ingestion;
 
-						// Handle case where ingestion is null (completed and cleaned up)
+						// Handle case where ingestion is null (error or unavailable)
 						if (!ingestionData) {
 							if (pollAttempt >= 5) {
 								importComplete = true;
-								importSuccess = true;
+								importSuccess = false;
+								importError = 'Ingestion status unavailable (null response). Check Speckle project manually to verify import status.';
 								lastPollData = {
 									pollAttempt,
-									ingestionStatus: 'null - possibly completed and cleaned up',
+									ingestionStatus: 'null - status unavailable after 5 attempts',
 								};
 							}
 							continue;
