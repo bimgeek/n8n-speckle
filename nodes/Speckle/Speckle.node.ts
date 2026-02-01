@@ -7,6 +7,7 @@ import type {
 } from 'n8n-workflow';
 import { NodeOperationError } from 'n8n-workflow';
 import { ObjectLoader2Factory } from '@speckle/objectloader2';
+import { executeGraphQLQuery, QUERIES } from './utils/graphql';
 import { httpVerbFields, httpVerbOperations } from './HttpVerbDescription';
 import { issuesFields, issuesOperations } from './IssuesDescription';
 import { modelFields, modelOperations } from './LoadModelDescription';
@@ -508,52 +509,14 @@ export class Speckle implements INodeType {
 					domain = domain.replace(/\/$/, '');
 
 					// Step 1: GraphQL query to get model info and rootObjectId
-					const graphqlQuery = {
-						query: `
-							query ($projectId: String!, $modelId: String!) {
-								project(id: $projectId) {
-									model(id: $modelId) {
-										id
-										name
-										versions(limit: 1) {
-											items {
-												id
-												referencedObject
-												sourceApplication
-											}
-										}
-									}
-								}
-							}
-						`,
-						variables: {
-							projectId,
-							modelId,
-						},
-					};
-
-					const graphqlUrl = `${domain}/graphql`;
-					const graphqlOptions: IHttpRequestOptions = {
-						method: 'POST',
-						url: graphqlUrl,
-						headers: {
-							'Content-Type': 'application/json',
-							Authorization: token,
-						},
-						body: graphqlQuery,
-						json: true,
-					};
-
-					let graphqlResponse;
-					try {
-						graphqlResponse = await this.helpers.httpRequest(graphqlOptions);
-					} catch (error) {
-						throw new NodeOperationError(
-							this.getNode(),
-							`GraphQL request failed: ${error.message}. URL attempted: ${graphqlUrl}`,
-							{ itemIndex },
-						);
-					}
+					const graphqlResponse = await executeGraphQLQuery(
+						this,
+						domain,
+						token,
+						QUERIES.modelMetadata(projectId, modelId),
+						'fetch model metadata',
+						itemIndex,
+					);
 
 					// Extract rootObjectId from response
 					const modelData = graphqlResponse.data?.project?.model;
@@ -830,8 +793,6 @@ export class Speckle implements INodeType {
 					// Remove trailing slash from domain if present
 					domain = domain.replace(/\/$/, '');
 
-					const graphqlUrl = `${domain}/graphql`;
-
 					// Step 2: Get binary file data
 					const binaryData = items[itemIndex].binary;
 					if (!binaryData || !binaryData[binaryPropertyName]) {
@@ -846,57 +807,14 @@ export class Speckle implements INodeType {
 					const fileName = binaryData[binaryPropertyName].fileName || 'upload.ifc';
 
 					// Step 3: Query project.models to find model by name
-					const findModelQuery = {
-						query: `
-							query FindModelByName($projectId: String!, $filter: ProjectModelsFilter) {
-								project(id: $projectId) {
-									models(filter: $filter) {
-										items {
-											id
-											name
-										}
-									}
-								}
-							}
-						`,
-						variables: {
-							projectId,
-							filter: { search: modelName },
-						},
-					};
-
-					const findModelOptions: IHttpRequestOptions = {
-						method: 'POST',
-						url: graphqlUrl,
-						headers: {
-							'Content-Type': 'application/json',
-							Authorization: token,
-						},
-						body: findModelQuery,
-						json: true,
-					};
-
-					let findModelResponse;
-					try {
-						findModelResponse = await this.helpers.httpRequest(findModelOptions);
-					} catch (error) {
-						throw new NodeOperationError(
-							this.getNode(),
-							`Failed to query models: ${error.message}`,
-							{ itemIndex },
-						);
-					}
-
-					if (findModelResponse.errors && findModelResponse.errors.length > 0) {
-						const errorMessages = findModelResponse.errors
-							.map((e: { message: string }) => e.message)
-							.join('; ');
-						throw new NodeOperationError(
-							this.getNode(),
-							`GraphQL error while querying models: ${errorMessages}`,
-							{ itemIndex },
-						);
-					}
+					const findModelResponse = await executeGraphQLQuery(
+						this,
+						domain,
+						token,
+						QUERIES.findModelByName(projectId, modelName),
+						'find model by name',
+						itemIndex,
+					);
 
 					// Find exact match for model name
 					const models = findModelResponse.data?.project?.models?.items || [];
@@ -920,56 +838,14 @@ export class Speckle implements INodeType {
 						}
 					} else {
 						// Create new model
-						const createModelMutation = {
-							query: `
-								mutation CreateModel($input: CreateModelInput!) {
-									modelMutations {
-										create(input: $input) {
-											id
-										}
-									}
-								}
-							`,
-							variables: {
-								input: {
-									projectId,
-									name: modelName,
-								},
-							},
-						};
-
-						const createModelOptions: IHttpRequestOptions = {
-							method: 'POST',
-							url: graphqlUrl,
-							headers: {
-								'Content-Type': 'application/json',
-								Authorization: token,
-							},
-							body: createModelMutation,
-							json: true,
-						};
-
-						let createModelResponse;
-						try {
-							createModelResponse = await this.helpers.httpRequest(createModelOptions);
-						} catch (error) {
-							throw new NodeOperationError(
-								this.getNode(),
-								`Failed to create model: ${error.message}`,
-								{ itemIndex },
-							);
-						}
-
-						if (createModelResponse.errors && createModelResponse.errors.length > 0) {
-							const errorMessages = createModelResponse.errors
-								.map((e: { message: string }) => e.message)
-								.join('; ');
-							throw new NodeOperationError(
-								this.getNode(),
-								`GraphQL error while creating model: ${errorMessages}`,
-								{ itemIndex },
-							);
-						}
+						const createModelResponse = await executeGraphQLQuery(
+							this,
+							domain,
+							token,
+							QUERIES.createModel(projectId, modelName),
+							'create model',
+							itemIndex,
+						);
 
 						modelId = createModelResponse.data?.modelMutations?.create?.id;
 						if (!modelId) {
@@ -983,57 +859,14 @@ export class Speckle implements INodeType {
 					}
 
 					// Step 5: Generate presigned upload URL
-					const generateUrlMutation = {
-						query: `
-							mutation GenerateFileUploadUrl($input: GenerateFileUploadUrlInput!) {
-								fileUploadMutations {
-									generateUploadUrl(input: $input) {
-										url
-										fileId
-									}
-								}
-							}
-						`,
-						variables: {
-							input: {
-								projectId,
-								fileName,
-							},
-						},
-					};
-
-					const generateUrlOptions: IHttpRequestOptions = {
-						method: 'POST',
-						url: graphqlUrl,
-						headers: {
-							'Content-Type': 'application/json',
-							Authorization: token,
-						},
-						body: generateUrlMutation,
-						json: true,
-					};
-
-					let generateUrlResponse;
-					try {
-						generateUrlResponse = await this.helpers.httpRequest(generateUrlOptions);
-					} catch (error) {
-						throw new NodeOperationError(
-							this.getNode(),
-							`Failed to generate upload URL: ${error.message}`,
-							{ itemIndex },
-						);
-					}
-
-					if (generateUrlResponse.errors && generateUrlResponse.errors.length > 0) {
-						const errorMessages = generateUrlResponse.errors
-							.map((e: { message: string }) => e.message)
-							.join('; ');
-						throw new NodeOperationError(
-							this.getNode(),
-							`GraphQL error while generating upload URL: ${errorMessages}`,
-							{ itemIndex },
-						);
-					}
+					const generateUrlResponse = await executeGraphQLQuery(
+						this,
+						domain,
+						token,
+						QUERIES.generateUploadUrl(projectId, fileName),
+						'generate upload URL',
+						itemIndex,
+					);
 
 					const presignedUrl = generateUrlResponse.data?.fileUploadMutations?.generateUploadUrl?.url;
 					const fileId = generateUrlResponse.data?.fileUploadMutations?.generateUploadUrl?.fileId;
@@ -1092,85 +925,14 @@ export class Speckle implements INodeType {
 					}
 
 					// Step 7: Start file ingestion (MODERN API)
-					const startIngestionMutation = {
-						query: `
-							mutation StartFileIngestion($input: StartFileImportInput!) {
-								fileUploadMutations {
-									startFileIngestion(input: $input) {
-										id
-										projectId
-										modelId
-										statusData {
-											__typename
-											... on ModelIngestionQueuedStatus {
-												status
-												progressMessage
-											}
-											... on ModelIngestionProcessingStatus {
-												status
-												progressMessage
-												progress
-											}
-											... on ModelIngestionSuccessStatus {
-												status
-												versionId
-											}
-											... on ModelIngestionFailedStatus {
-												status
-												errorReason
-												errorStacktrace
-											}
-											... on ModelIngestionCancelledStatus {
-												status
-												cancellationMessage
-											}
-										}
-									}
-								}
-							}
-						`,
-						variables: {
-							input: {
-								projectId,
-								modelId,
-								fileId,
-								etag: etag,
-							},
-						},
-					};
-
-					const startIngestionOptions: IHttpRequestOptions = {
-						method: 'POST',
-						url: graphqlUrl,
-						headers: {
-							'Content-Type': 'application/json',
-							Authorization: token,
-						},
-						body: startIngestionMutation,
-						json: true,
-					};
-
-					let startIngestionResponse;
-					try {
-						startIngestionResponse = await this.helpers.httpRequest(startIngestionOptions);
-					} catch (error) {
-						throw new NodeOperationError(
-							this.getNode(),
-							`Failed to start file ingestion: ${error.message}`,
-							{ itemIndex },
-						);
-					}
-
-					if (startIngestionResponse.errors && startIngestionResponse.errors.length > 0) {
-						const errorMessages = startIngestionResponse.errors
-							.map((e: { message: string }) => e.message)
-							.join('; ');
-						throw new NodeOperationError(
-							this.getNode(),
-							`GraphQL error while starting ingestion: ${errorMessages}`,
-							{ itemIndex },
-						);
-					}
+					const startIngestionResponse = await executeGraphQLQuery(
+						this,
+						domain,
+						token,
+						QUERIES.startIngestion(projectId, modelId, fileId, etag),
+						'start ingestion',
+						itemIndex,
+					);
 
 					const startIngestionData = startIngestionResponse.data?.fileUploadMutations?.startFileIngestion;
 					const ingestionId = startIngestionData?.id;
@@ -1189,59 +951,7 @@ export class Speckle implements INodeType {
 					const initialConvertedStatus = mapIngestionStatusToLegacyCode(initialStatus);
 
 					// Step 8: Poll for ingestion status until complete
-					const checkStatusQuery = {
-						query: `
-							query CheckIngestionStatus($projectId: String!, $ingestionId: String!) {
-								project(id: $projectId) {
-									ingestion(id: $ingestionId) {
-										id
-										projectId
-										modelId
-										statusData {
-											__typename
-											... on ModelIngestionQueuedStatus {
-												status
-												progressMessage
-											}
-											... on ModelIngestionProcessingStatus {
-												status
-												progressMessage
-												progress
-											}
-											... on ModelIngestionSuccessStatus {
-												status
-												versionId
-											}
-											... on ModelIngestionFailedStatus {
-												status
-												errorReason
-												errorStacktrace
-											}
-											... on ModelIngestionCancelledStatus {
-												status
-												cancellationMessage
-											}
-										}
-									}
-								}
-							}
-						`,
-						variables: {
-							projectId,
-							ingestionId,
-						},
-					};
-
-					const checkStatusOptions: IHttpRequestOptions = {
-						method: 'POST',
-						url: graphqlUrl,
-						headers: {
-							'Content-Type': 'application/json',
-							Authorization: token,
-						},
-						body: checkStatusQuery,
-						json: true,
-					};
+					const checkStatusQuery = QUERIES.checkIngestionStatus(projectId, ingestionId);
 
 					// Poll every 3 seconds, max 60 attempts (~3 minutes)
 					const MAX_POLL_ATTEMPTS = 60;
@@ -1263,9 +973,16 @@ export class Speckle implements INodeType {
 
 						let statusResponse;
 						try {
-							statusResponse = await this.helpers.httpRequest(checkStatusOptions);
+							statusResponse = await executeGraphQLQuery(
+								this,
+								domain,
+								token,
+								checkStatusQuery,
+								'check ingestion status',
+								itemIndex,
+							);
 						} catch (error) {
-							// Continue polling on network errors
+							// Continue polling on network/GraphQL errors
 							this.logger.warn(`Poll attempt ${pollAttempt} failed: ${error.message}`);
 							continue;
 						}
@@ -1489,40 +1206,14 @@ export class Speckle implements INodeType {
 						},
 					};
 
-					const graphqlUrl = `${domain}/graphql`;
-					const graphqlOptions: IHttpRequestOptions = {
-						method: 'POST',
-						url: graphqlUrl,
-						headers: {
-							'Content-Type': 'application/json',
-							Authorization: token,
-						},
-						body: graphqlQuery,
-						json: true,
-					};
-
-					let graphqlResponse;
-					try {
-						graphqlResponse = await this.helpers.httpRequest(graphqlOptions);
-					} catch (error) {
-						throw new NodeOperationError(
-							this.getNode(),
-							`GraphQL request failed: ${error.message}. URL attempted: ${graphqlUrl}`,
-							{ itemIndex },
-						);
-					}
-
-					// Check for GraphQL errors first
-					if (graphqlResponse.errors && graphqlResponse.errors.length > 0) {
-						const errorMessages = graphqlResponse.errors
-							.map((e: { message: string }) => e.message)
-							.join('; ');
-						throw new NodeOperationError(
-							this.getNode(),
-							`GraphQL error: ${errorMessages}`,
-							{ itemIndex },
-						);
-					}
+					const graphqlResponse = await executeGraphQLQuery(
+						this,
+						domain,
+						token,
+						graphqlQuery,
+						'fetch issues',
+						itemIndex,
+					);
 
 					// Extract issues from the response
 					const issues = graphqlResponse.data?.project?.issues?.items;
