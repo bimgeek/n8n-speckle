@@ -1,3 +1,5 @@
+<img width="1584" height="396" alt="image" src="https://github.com/user-attachments/assets/c10ca8a1-5dc7-4b05-a1f2-2cb6c58c57b5" />
+
 # n8n Speckle Integration
 
 Custom n8n nodes for integrating with [Speckle](https://speckle.systems). Load/query 3D models, upload files, manage issues, and monitor real-time updates in n8n workflows.
