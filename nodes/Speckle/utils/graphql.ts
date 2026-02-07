@@ -176,47 +176,4 @@ export const QUERIES = {
 			},
 		},
 	}),
-
-	checkIngestionStatus: (projectId: string, ingestionId: string) => ({
-		query: `
-			query CheckIngestionStatus($projectId: String!, $ingestionId: String!) {
-				project(id: $projectId) {
-					ingestion(id: $ingestionId) {
-						id
-						projectId
-						modelId
-						statusData {
-							__typename
-							... on ModelIngestionQueuedStatus {
-								status
-								progressMessage
-							}
-							... on ModelIngestionProcessingStatus {
-								status
-								progressMessage
-								progress
-							}
-							... on ModelIngestionSuccessStatus {
-								status
-								versionId
-							}
-							... on ModelIngestionFailedStatus {
-								status
-								errorReason
-								errorStacktrace
-							}
-							... on ModelIngestionCancelledStatus {
-								status
-								cancellationMessage
-							}
-						}
-					}
-				}
-			}
-		`,
-		variables: {
-			projectId,
-			ingestionId,
-		},
-	}),
 };

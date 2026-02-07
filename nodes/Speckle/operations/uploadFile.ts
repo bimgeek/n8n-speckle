@@ -2,16 +2,10 @@ import type { IExecuteFunctions, INodeExecutionData, IHttpRequestOptions } from 
 import { NodeOperationError } from 'n8n-workflow';
 import { executeGraphQLQuery, QUERIES } from '../utils/graphql';
 import { extractProjectId } from '../utils/urlParsing';
-import {
-	mapIngestionStatusToLegacyCode,
-	extractVersionIdFromIngestionStatus,
-	extractErrorMessageFromIngestionStatus,
-	extractProgressFromIngestionStatus,
-} from '../utils/ingestionStatus';
 
 /**
  * Handles the Upload File operation
- * Multi-step file upload to Speckle with S3 and polling
+ * Multi-step file upload to Speckle with S3, returns after ingestion is started
  */
 export async function handleUploadFile(
 	context: IExecuteFunctions,
@@ -183,7 +177,6 @@ export async function handleUploadFile(
 			const startIngestionData =
 				startIngestionResponse.data?.fileUploadMutations?.startFileIngestion;
 			const ingestionId = startIngestionData?.id;
-			const initialStatusData = startIngestionData?.statusData;
 
 			if (!ingestionId) {
 				throw new NodeOperationError(
@@ -193,153 +186,28 @@ export async function handleUploadFile(
 				);
 			}
 
-			// Extract initial status for backward compatibility
-			const initialStatus = initialStatusData?.status || 'queued';
-			const initialConvertedStatus = mapIngestionStatusToLegacyCode(initialStatus);
-
-			// Step 8: Poll for ingestion status until complete
-			const checkStatusQuery = QUERIES.checkIngestionStatus(projectId, ingestionId);
-
-			// Poll every 3 seconds, max 60 attempts (~3 minutes)
-			const MAX_POLL_ATTEMPTS = 60;
-			const POLL_INTERVAL_MS = 3000;
-			let pollAttempt = 0;
-			let importComplete = false;
-			let importSuccess = false;
-			let importError = '';
-			let lastPollData: object | null = null;
-			let versionId: string | null = null; // Store version ID from success status
-
-			while (pollAttempt < MAX_POLL_ATTEMPTS && !importComplete) {
-				pollAttempt++;
-
-				// Wait before polling (except first attempt)
-				if (pollAttempt > 1) {
-					await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
-				}
-
-				let statusResponse;
-				try {
-					statusResponse = await executeGraphQLQuery(
-						context,
-						domain,
-						token,
-						checkStatusQuery,
-						'check ingestion status',
-						itemIndex,
-					);
-				} catch (error) {
-					// Continue polling on network/GraphQL errors
-					context.logger.warn(`Poll attempt ${pollAttempt} failed: ${error.message}`);
-					continue;
-				}
-
-				const ingestionData = statusResponse.data?.project?.ingestion;
-
-				// Handle case where ingestion is null (error or unavailable)
-				if (!ingestionData) {
-					if (pollAttempt >= 5) {
-						importComplete = true;
-						importSuccess = false;
-						importError =
-							'Ingestion status unavailable (null response). Check Speckle project manually to verify import status.';
-						lastPollData = {
-							pollAttempt,
-							ingestionStatus: 'null - status unavailable after 5 attempts',
-						};
-					}
-					continue;
-				}
-
-				const statusData = ingestionData.statusData;
-				const status = statusData?.status || 'queued';
-				const progressInfo = extractProgressFromIngestionStatus(statusData);
-
-				lastPollData = {
-					pollAttempt,
-					ingestionId: ingestionData.id,
-					status: status,
-					statusType: statusData.__typename,
-					progressMessage: progressInfo.message,
-					progress: progressInfo.progress,
-				};
-
-				// Check if ingestion is complete
-				if (status === 'success') {
-					importComplete = true;
-					importSuccess = true;
-					versionId = extractVersionIdFromIngestionStatus(statusData);
-				} else if (status === 'failed' || status === 'cancelled') {
-					importComplete = true;
-					importSuccess = false;
-					importError = extractErrorMessageFromIngestionStatus(statusData);
-				}
-				// 'queued' or 'processing' means continue polling
-			}
-
-			// Step 9: Return result
-			const debug = {
-				api: 'ModelIngestion', // Indicate which API is being used
-				s3StatusCode,
-				etag,
-				fileSize: fileBuffer.length,
-				fileName,
-				initialStatus: initialStatus, // String status
-				initialConvertedStatus, // Numeric for backward compatibility
-				pollAttempts: pollAttempt,
-				lastPollData,
-			};
-
-			if (importSuccess) {
-				returnData.push({
-					json: {
-						success: true,
-						projectId,
-						modelId,
-						modelName,
-						modelCreated,
-						fileId,
+			// Step 8: Return result — processing continues in Speckle
+			returnData.push({
+				json: {
+					success: true,
+					projectId,
+					modelId,
+					modelName,
+					modelCreated,
+					fileId,
+					fileName,
+					ingestionId,
+					status: 'ingestion_started',
+					message: 'File uploaded and ingestion started. Processing continues in Speckle.',
+					debug: {
+						s3StatusCode,
+						etag,
+						fileSize: fileBuffer.length,
 						fileName,
-						importId: ingestionId, // Now using ingestionId
-						versionId, // NEW: Version ID from success status
-						status: 'success',
-						message: 'File imported successfully',
-						debug,
 					},
-					pairedItem: itemIndex,
-				});
-			} else if (importComplete && !importSuccess) {
-				returnData.push({
-					json: {
-						success: false,
-						projectId,
-						modelId,
-						modelName,
-						fileId,
-						importId: ingestionId, // Updated
-						status: 'error',
-						error: `Import failed: ${importError}`,
-						debug,
-					},
-					pairedItem: itemIndex,
-				});
-			} else {
-				// Timeout - import still processing
-				returnData.push({
-					json: {
-						success: false,
-						projectId,
-						modelId,
-						modelName,
-						fileId,
-						importId: ingestionId, // Updated
-						status: 'timeout',
-						error: 'Import is still processing. Check Speckle for status.',
-						debug,
-					},
-					pairedItem: itemIndex,
-				});
-			}
+				},
+				pairedItem: itemIndex,
+			});
 		} catch (error) {
 			if (context.continueOnFail()) {
 				returnData.push({
