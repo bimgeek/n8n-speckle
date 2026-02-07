@@ -24,10 +24,6 @@ export async function handleUploadFile(
 			// Get parameters
 			const projectInput = context.getNodeParameter('projectInput', itemIndex) as string;
 			const modelName = context.getNodeParameter('modelName', itemIndex) as string;
-			const overrideExisting = context.getNodeParameter(
-				'overrideExisting',
-				itemIndex,
-			) as boolean;
 			const binaryPropertyName = context.getNodeParameter(
 				'binaryPropertyName',
 				itemIndex,
@@ -78,43 +74,34 @@ export async function handleUploadFile(
 					(m.name ?? '').toLowerCase() === modelNameLower,
 			);
 
-			// Step 4: Handle model existence
-			let modelId: string;
-			let modelCreated = false;
+		// Step 4: Handle model existence
+		let modelId: string;
+		let modelCreated = false;
 
-			if (existingModel) {
-				if (overrideExisting) {
-					// Use existing model
-					modelId = existingModel.id;
-				} else {
-					// Throw error - model exists and override is false
-					throw new NodeOperationError(
-						context.getNode(),
-						`Model '${modelName}' already exists. Set 'Override If Exists' to true to upload a new version.`,
-						{ itemIndex },
-					);
-				}
-			} else {
-				// Create new model
-				const createModelResponse = await executeGraphQLQuery(
-					context,
-					domain,
-					token,
-					QUERIES.createModel(projectId, modelName),
-					'create model',
-					itemIndex,
+		if (existingModel) {
+			// Use existing model
+			modelId = existingModel.id;
+		} else {
+			// Create new model
+			const createModelResponse = await executeGraphQLQuery(
+				context,
+				domain,
+				token,
+				QUERIES.createModel(projectId, modelName),
+				'create model',
+				itemIndex,
+			);
+
+			modelId = createModelResponse.data?.modelMutations?.create?.id;
+			if (!modelId) {
+				throw new NodeOperationError(
+					context.getNode(),
+					'Failed to create model: No model ID returned',
+					{ itemIndex },
 				);
-
-				modelId = createModelResponse.data?.modelMutations?.create?.id;
-				if (!modelId) {
-					throw new NodeOperationError(
-						context.getNode(),
-						'Failed to create model: No model ID returned',
-						{ itemIndex },
-					);
-				}
-				modelCreated = true;
 			}
+			modelCreated = true;
+		}
 
 			// Step 5: Generate presigned upload URL
 			const generateUrlResponse = await executeGraphQLQuery(

@@ -33,20 +33,6 @@ export const uploadFileFields: INodeProperties[] = [
 		required: true,
 	},
 	{
-		displayName: 'Override If Exists',
-		name: 'overrideExisting',
-		type: 'boolean',
-		default: true,
-		description:
-			'Whether to upload a new version if a model with the same name exists. If false, throws an error when model exists.',
-		displayOptions: {
-			show: {
-				resource: ['model'],
-				operation: ['uploadFile'],
-			},
-		},
-	},
-	{
 		displayName: 'Binary Property',
 		name: 'binaryPropertyName',
 		type: 'string',
