@@ -70,10 +70,12 @@ export async function handleUploadFile(
 				itemIndex,
 			);
 
-			// Find exact match for model name
+			// Find exact match for model name (Speckle stores model names in lowercase)
 			const models = findModelResponse.data?.project?.models?.items || [];
+			const modelNameLower = modelName?.toLowerCase() ?? '';
 			const existingModel = models.find(
-				(m: { id: string; name: string }) => m.name === modelName,
+				(m: { id: string; name: string }) =>
+					(m.name ?? '').toLowerCase() === modelNameLower,
 			);
 
 			// Step 4: Handle model existence
